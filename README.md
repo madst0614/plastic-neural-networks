@@ -7,7 +7,7 @@
 
 > Achieving 88% of BERT's performance with 41% of the parameters through recurrent delta refinement
 
-[Paper](https://doi.org/10.5281/zenodo.17548176) | [Twitter Thread](https://twitter.com/yourusername) | [Blog Post](#) (coming soon)
+[Paper](https://doi.org/10.5281/zenodo.17548176) | [Twitter Thread](https://twitter.com/madst0614)
 
 ---
 
@@ -71,7 +71,7 @@ See [Architecture Details](#architecture-details) for more.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/plastic-neural-networks.git
+git clone https://github.com/madst0614/plastic-neural-networks.git
 cd plastic-neural-networks
 
 # Create virtual environment
@@ -469,8 +469,8 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## 🐛 Issues & Questions
 
-- **Bug reports**: [GitHub Issues](https://github.com/yourusername/plastic-neural-networks/issues)
-- **Questions**: [GitHub Discussions](https://github.com/yourusername/plastic-neural-networks/discussions)
+- **Bug reports**: [GitHub Issues](https://github.com/madst0614/plastic-neural-networks/issues)
+- **Questions**: [GitHub Discussions](https://github.com/madst0614/plastic-neural-networks/discussions)
 - **Email**: madst0614@gmail.com
 
 ---
