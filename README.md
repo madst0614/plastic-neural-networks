@@ -433,6 +433,52 @@ python train.py --dataset bookcorpus
 python train.py --dataset c4
 ```
 
+### Experimental Evidence
+
+Test neuroscience-inspired hypotheses about PNN's biological plausibility:
+
+```bash
+# Run all experiments
+python scripts/experimental_evidence.py \
+    --checkpoint checkpoints/best_model.pt
+
+# Run specific experiments
+python scripts/experimental_evidence.py \
+    --checkpoint checkpoints/best_model.pt \
+    --experiment meg
+
+python scripts/experimental_evidence.py \
+    --checkpoint checkpoints/best_model.pt \
+    --experiment optogenetics
+
+python scripts/experimental_evidence.py \
+    --checkpoint checkpoints/best_model.pt \
+    --experiment modeling
+```
+
+**Three experimental approaches:**
+
+1. **MEG Simulation (High-temporal resolution)**
+   - Analyzes activity patterns within gamma cycles
+   - Tests: Delta generation → Gate computation → Update
+   - Provides millisecond-resolution insights
+
+2. **Optogenetics Simulation**
+   - Suppresses specific components (attention, gate, FFN)
+   - Measures behavioral changes (accuracy, loss)
+   - Tests causal role of each component
+
+3. **Brain Activity Modeling**
+   - Extracts activation patterns across processing steps
+   - Compares with neuroscience hypotheses
+   - Tests: Early exploration → Mid selectivity → Late integration
+
+**Output:**
+- `results/experimental_evidence/experimental_results.json`
+- `results/experimental_evidence/meg_temporal_patterns.png`
+- `results/experimental_evidence/optogenetics_suppression.png`
+- `results/experimental_evidence/brain_activity_patterns.png`
+
 ---
 
 ## 📚 Citation
