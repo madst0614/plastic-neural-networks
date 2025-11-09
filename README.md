@@ -438,7 +438,7 @@ python train.py --dataset c4
 Test neuroscience-inspired hypotheses about PNN's biological plausibility:
 
 ```bash
-# Run all experiments
+# Run all experiments (7 experiments total)
 python scripts/experimental_evidence.py \
     --checkpoint checkpoints/best_model.pt
 
@@ -449,35 +449,67 @@ python scripts/experimental_evidence.py \
 
 python scripts/experimental_evidence.py \
     --checkpoint checkpoints/best_model.pt \
-    --experiment optogenetics
+    --experiment gate_specificity
 
+# Custom output directory
 python scripts/experimental_evidence.py \
     --checkpoint checkpoints/best_model.pt \
-    --experiment modeling
+    --output_dir /path/to/results
 ```
 
-**Three experimental approaches:**
+**Seven experimental approaches:**
 
-1. **MEG Simulation (High-temporal resolution)**
-   - Analyzes activity patterns within gamma cycles
-   - Tests: Delta generation → Gate computation → Update
-   - Provides millisecond-resolution insights
+**Neuroscience Tests (1-3):**
+1. **MEG Simulation** - High-temporal resolution activity patterns
+   - Gamma cycle analysis: Delta → Gate → Update
+   - Millisecond-level temporal insights
 
-2. **Optogenetics Simulation**
-   - Suppresses specific components (attention, gate, FFN)
-   - Measures behavioral changes (accuracy, loss)
-   - Tests causal role of each component
+2. **Optogenetics** - Component suppression experiments
+   - Attention/Gate/FFN suppression at multiple rates
+   - Causal role testing
 
-3. **Brain Activity Modeling**
-   - Extracts activation patterns across processing steps
-   - Compares with neuroscience hypotheses
+3. **Brain Activity Modeling** - Pattern prediction vs hypotheses
+   - Selectivity analysis across processing steps
    - Tests: Early exploration → Mid selectivity → Late integration
 
+**Advanced Analysis (4-6):**
+4. **Dimension-wise Analysis** - Per-dimension pattern classification
+   - Accumulator/Selector/Oscillator/Stable patterns
+   - Tests: Which dimensions do what?
+
+5. **Token Difficulty Analysis** - Easy vs Hard token processing
+   - Activity by prediction confidence
+   - Tests: Hard tokens need more processing?
+
+6. **Layer Importance** - Component importance ranking
+   - Suppression-based importance measurement
+   - Tests: Which component matters most?
+
+**Gate Specificity (7) - CRITICAL:**
+7. **Gate Specificity Tests** - True gate importance (NOT just robustness)
+   - **Pattern Tests (Priority 1):**
+     - Random Dropout: Information loss from masking
+     - Anti-Gate: Inverse selection (proves directionality!)
+     - Noise Injection: Precision requirements
+     - Pattern Shuffling: Spatial pattern vs magnitude
+     - Uniform Gate: Removes selectivity (proves pattern = info!)
+   - **Magnitude Test (Priority 2):**
+     - Magnitude Scaling: Robustness to strength
+
+   **Why This Matters:**
+   - Previous suppression tests = step robustness (uniform scaling)
+   - Gate specificity tests = true importance (selective function)
+   - Anti-Gate >> Magnitude Scaling → Gate does real feature selection!
+
 **Output:**
-- `results/experimental_evidence/experimental_results.json`
-- `results/experimental_evidence/meg_temporal_patterns.png`
-- `results/experimental_evidence/optogenetics_suppression.png`
-- `results/experimental_evidence/brain_activity_patterns.png`
+- `experimental_results.json` - All results in JSON
+- `meg_temporal_patterns.png` - MEG analysis
+- `optogenetics_suppression.png` - Component suppression
+- `brain_activity_patterns.png` - Brain modeling
+- `dimensionwise_patterns.png` - Dimension analysis
+- `token_difficulty_analysis.png` - Token difficulty
+- `layer_importance_analysis.png` - Component ranking
+- `gate_specificity_tests.png` - **Gate importance proof** (9-panel visualization)
 
 ---
 
