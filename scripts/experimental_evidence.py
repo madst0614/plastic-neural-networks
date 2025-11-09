@@ -433,6 +433,27 @@ class OptogeneticsSimulator:
             'accuracy_drop': results['baseline']['accuracy'] - uniform_metrics['accuracy']
         }
 
+        # Test 6: Magnitude scaling (robustness to different scales)
+        print("\n🔬 Test 6: Magnitude Scaling")
+        print("   Purpose: Test robustness to different gate magnitudes (not pattern)")
+
+        scales = [0.25, 0.5, 0.75, 1.5, 2.0]
+        scaling_results = {}
+
+        for scale in scales:
+            print(f"   Scale: {scale}")
+
+            handle = self._apply_magnitude_scaling(scale)
+            metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+            handle.remove()
+
+            scaling_results[f'scale_{int(scale*100)}'] = {
+                'metrics': metrics,
+                'accuracy_drop': results['baseline']['accuracy'] - metrics['accuracy']
+            }
+
+        results['magnitude_scaling'] = scaling_results
+
         return results
 
     def _apply_gate_dropout(self, dropout_rate: float):
@@ -509,6 +530,21 @@ class OptogeneticsSimulator:
                 return uniform
 
         hook = UniformGateHook()
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_magnitude_scaling(self, scale: float):
+        """Scale gate magnitude (keeps pattern, changes magnitude)"""
+        class MagnitudeScalingHook:
+            def __init__(self, scale):
+                self.scale = scale
+
+            def __call__(self, module, input, output):
+                # Scale gate values while keeping pattern
+                # This tests robustness to different gate strengths
+                return output * self.scale
+
+        hook = MagnitudeScalingHook(scale)
         handle = self.model.delta_refiner.gate.register_forward_hook(hook)
         return handle
 
@@ -1262,7 +1298,7 @@ def save_visualizations(results: Dict, output_dir: Path):
     if 'gate_specificity' in results:
         gate_spec = results['gate_specificity']
 
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig, axes = plt.subplots(3, 3, figsize=(18, 15))
         fig.suptitle('Gate Specificity Tests: True Gate Importance', fontsize=16)
         axes = axes.flatten()
 
@@ -1338,7 +1374,27 @@ def save_visualizations(results: Dict, output_dir: Path):
             axes[4].text(0, uniform_drop + 1, f'{uniform_drop:.1f}%',
                         ha='center', va='bottom', fontweight='bold')
 
-        # Summary comparison (Test 6)
+        # Test 6: Magnitude scaling
+        if 'magnitude_scaling' in gate_spec:
+            scales = []
+            drops = []
+            for key, data in gate_spec['magnitude_scaling'].items():
+                scale = int(key.split('_')[1]) / 100
+                scales.append(scale)
+                drops.append(data['accuracy_drop'] * 100)
+
+            if scales:
+                sorted_pairs = sorted(zip(scales, drops))
+                scales, drops = zip(*sorted_pairs)
+                axes[5].plot(scales, drops, marker='o', linewidth=2, color='#4ecdc4')
+                axes[5].axhline(y=0, color='green', linestyle='--', alpha=0.5)
+                axes[5].fill_between(scales, 0, drops, alpha=0.3, color='#4ecdc4')
+                axes[5].set_xlabel('Gate Scale Factor')
+                axes[5].set_ylabel('Accuracy Drop (%)')
+                axes[5].set_title('Test 6: Magnitude Scaling\n(Robustness Test)')
+                axes[5].grid(True, alpha=0.3)
+
+        # Summary comparison (Pattern Tests)
         test_names = []
         test_drops = []
 
@@ -1354,13 +1410,51 @@ def save_visualizations(results: Dict, output_dir: Path):
 
         if test_names:
             colors_summary = ['#ff6b6b', '#ff9999', '#ffcccc']
-            axes[5].barh(test_names, test_drops, color=colors_summary[:len(test_names)])
-            axes[5].set_xlabel('Accuracy Drop (%)')
-            axes[5].set_title('Summary: Pattern Tests\n(Larger = More Important)')
-            axes[5].grid(True, alpha=0.3, axis='x')
+            axes[6].barh(test_names, test_drops, color=colors_summary[:len(test_names)])
+            axes[6].set_xlabel('Accuracy Drop (%)')
+            axes[6].set_title('Summary: Pattern Tests\n(Larger = More Important)')
+            axes[6].grid(True, alpha=0.3, axis='x')
 
             for i, (name, drop) in enumerate(zip(test_names, test_drops)):
-                axes[5].text(drop + 0.5, i, f'{drop:.1f}%', va='center')
+                axes[6].text(drop + 0.5, i, f'{drop:.1f}%', va='center')
+
+        # Interpretation guide (in remaining subplots)
+        axes[7].axis('off')
+        interpretation_text = """
+        Key Insights:
+
+        Pattern Tests (1-5):
+        • Anti-Gate: Proves selection quality
+        • Shuffled: Pattern > Magnitude
+        • Uniform: Selection = critical
+
+        Robustness Test (6):
+        • Magnitude scaling: Tests stability
+        • Flat line = robust to strength
+        • Sharp drop = fragile
+        """
+        axes[7].text(0.1, 0.5, interpretation_text,
+                    transform=axes[7].transAxes,
+                    fontsize=11, verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+        axes[8].axis('off')
+        conclusion_text = """
+        Conclusion:
+
+        If Anti-Gate >> Magnitude Scaling:
+        → Gate's selective function matters
+        → Not just step size control
+        → True importance demonstrated!
+
+        This proves gate is NOT just
+        "learning rate" but actual
+        feature selection mechanism.
+        """
+        axes[8].text(0.1, 0.5, conclusion_text,
+                    transform=axes[8].transAxes,
+                    fontsize=11, verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
 
         plt.tight_layout()
         plt.savefig(output_dir / 'gate_specificity_tests.png', dpi=300)
@@ -1661,6 +1755,15 @@ def main():
             print(f"\n  Test 5 - Uniform Gate (No Selectivity):")
             print(f"    acc={acc:.2f}%, drop={drop:.2f}%")
             print(f"    → Pattern = information! Uniform = no selection = bad.")
+
+        # Magnitude scaling results
+        if 'magnitude_scaling' in gate_spec_results:
+            print(f"\n  Test 6 - Magnitude Scaling (Robustness):")
+            for key, data in gate_spec_results['magnitude_scaling'].items():
+                scale = int(key.split('_')[1]) / 100
+                drop = data['accuracy_drop'] * 100
+                print(f"    scale={scale:.2f}: acc={data['metrics']['accuracy']*100:.2f}%, drop={drop:.2f}%")
+            print(f"    → Tests robustness to gate strength (pattern preserved)")
 
     # Save results
     results_file = output_dir / 'experimental_results.json'
