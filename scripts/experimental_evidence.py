@@ -824,13 +824,17 @@ class TokenDifficultyAnalyzer:
                 # Masked token만 고려
                 mask = (labels != -100)
 
+                # Move tensors to CPU for safe indexing
+                mask_cpu = mask.cpu()
+                correct_probs_cpu = correct_probs.cpu()
+
                 # 난이도 분류 (확률 기반)
                 for i in range(input_ids.size(0)):
                     for j in range(input_ids.size(1)):
-                        if not mask[i, j]:
+                        if not mask_cpu[i, j]:
                             continue
 
-                        prob = correct_probs[i, j].item()
+                        prob = correct_probs_cpu[i, j].item()
 
                         # 각 step의 활동 추출
                         step_acts = [output[i, j].abs().mean().item() for output in all_outputs]
