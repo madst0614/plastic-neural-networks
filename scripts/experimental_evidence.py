@@ -641,8 +641,8 @@ def main():
     }
     model = create_pnn_model(model_config)
 
-    # Load checkpoint
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    # Load checkpoint (weights_only=False for compatibility with custom classes)
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(args.device)
     model.eval()
