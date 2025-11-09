@@ -641,9 +641,30 @@ def main():
     }
     model = create_pnn_model(model_config)
 
-    # Load checkpoint (weights_only=False for compatibility with custom classes)
-    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Load checkpoint with safe unpickling
+    # Define dummy Config class if it's in the checkpoint
+    class Config:
+        pass
+
+    try:
+        checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+    except Exception as e:
+        print(f"⚠️  Standard loading failed: {e}")
+        print("🔄 Trying alternative loading method...")
+        # Alternative: load with pickle protocol
+        import pickle
+        import io
+
+        class CustomUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if name == 'Config':
+                    return Config
+                return super().find_class(module, name)
+
+        with open(args.checkpoint, 'rb') as f:
+            checkpoint = CustomUnpickler(f).load()
+        model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(args.device)
     model.eval()
 
