@@ -438,7 +438,7 @@ python train.py --dataset c4
 Test neuroscience-inspired hypotheses about PNN's biological plausibility:
 
 ```bash
-# Run all experiments (7 experiments total)
+# Run all experiments (10 experiments total)
 python scripts/experimental_evidence.py \
     --checkpoint checkpoints/best_model.pt
 
@@ -457,7 +457,7 @@ python scripts/experimental_evidence.py \
     --output_dir /path/to/results
 ```
 
-**Seven experimental approaches:**
+**Ten experimental approaches:**
 
 **Neuroscience Tests (1-3):**
 1. **MEG Simulation** - High-temporal resolution activity patterns
@@ -472,7 +472,7 @@ python scripts/experimental_evidence.py \
    - Selectivity analysis across processing steps
    - Tests: Early exploration → Mid selectivity → Late integration
 
-**Advanced Analysis (4-6):**
+**Advanced Analysis (4-7):**
 4. **Dimension-wise Analysis** - Per-dimension pattern classification
    - Accumulator/Selector/Oscillator/Stable patterns
    - Tests: Which dimensions do what?
@@ -485,7 +485,6 @@ python scripts/experimental_evidence.py \
    - Suppression-based importance measurement
    - Tests: Which component matters most?
 
-**Gate Specificity (7) - CRITICAL:**
 7. **Gate Specificity Tests** - True gate importance (NOT just robustness)
    - **Pattern Tests (Priority 1):**
      - Random Dropout: Information loss from masking
@@ -501,6 +500,21 @@ python scripts/experimental_evidence.py \
    - Gate specificity tests = true importance (selective function)
    - Anti-Gate >> Magnitude Scaling → Gate does real feature selection!
 
+**Additional Analyses (8-10):**
+8. **Layer-wise Activity Analysis** - Activity accumulation across steps
+   - Tests: Early layers → Low activity, Late layers → High activity
+   - Measures activity accumulation pattern
+
+9. **Cross-Token Interference** - Token interaction analysis
+   - Easy-hard token interactions
+   - Tests: Do hard tokens interfere with easy ones?
+   - Context-dependent performance measurement
+
+10. **Gate Entropy Analysis** - Confidence measure via gate entropy
+    - Entropy: -sum(gate * log(gate))
+    - Tests: Easy tokens → Low entropy (high confidence)
+    - Hard tokens → High entropy (low confidence)
+
 **Output:**
 - `experimental_results.json` - All results in JSON
 - `meg_temporal_patterns.png` - MEG analysis
@@ -510,6 +524,9 @@ python scripts/experimental_evidence.py \
 - `token_difficulty_analysis.png` - Token difficulty
 - `layer_importance_analysis.png` - Component ranking
 - `gate_specificity_tests.png` - **Gate importance proof** (9-panel visualization)
+- `layerwise_activity_analysis.png` - Layer-wise activity patterns
+- `cross_token_interference.png` - Token interference effects
+- `gate_entropy_analysis.png` - Confidence via entropy
 
 ---
 
