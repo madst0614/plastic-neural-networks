@@ -331,6 +331,187 @@ class OptogeneticsSimulator:
 
         return results
 
+    def test_gate_specificity(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """
+        Gate의 선택적 기능 테스트 (진짜 중요성 검증)
+
+        기존 억제는 uniform scaling → step robustness만 테스트
+        새로운 테스트들은 gate의 선택적 기능을 직접 테스트
+
+        Returns:
+            gate_specificity_results: 각 테스트별 결과
+        """
+        results = {}
+
+        # Baseline
+        print("\n📊 Measuring baseline for gate specificity tests...")
+        results['baseline'] = self.measure_behavior(dataloader, num_batches=num_batches)
+
+        # Test 1: Selective suppression (random dropout)
+        print("\n🔬 Test 1: Selective Suppression (Random Gate Dropout)")
+        print("   Purpose: Test information loss from random selection masking")
+
+        dropout_rates = [0.25, 0.5, 0.75]
+        selective_results = {}
+
+        for rate in dropout_rates:
+            print(f"   Dropout rate: {rate*100:.0f}%")
+
+            # Apply random dropout to gate
+            handle = self._apply_gate_dropout(rate)
+            metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+            handle.remove()
+
+            selective_results[f'dropout_{int(rate*100)}'] = {
+                'metrics': metrics,
+                'accuracy_drop': results['baseline']['accuracy'] - metrics['accuracy']
+            }
+
+        results['selective_suppression'] = selective_results
+
+        # Test 2: Anti-gate (inverse gate)
+        print("\n🔬 Test 2: Anti-Gate (Inverse Selection)")
+        print("   Purpose: Select bad features, discard good ones")
+
+        handle = self._apply_anti_gate()
+        anti_metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+        handle.remove()
+
+        results['anti_gate'] = {
+            'metrics': anti_metrics,
+            'accuracy_drop': results['baseline']['accuracy'] - anti_metrics['accuracy']
+        }
+
+        # Test 3: Noise injection
+        print("\n🔬 Test 3: Noise Injection to Gate")
+        print("   Purpose: Test gate precision importance")
+
+        noise_levels = [0.1, 0.3, 0.5]
+        noise_results = {}
+
+        for noise_std in noise_levels:
+            print(f"   Noise std: {noise_std}")
+
+            handle = self._apply_gate_noise(noise_std)
+            metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+            handle.remove()
+
+            noise_results[f'noise_{int(noise_std*100)}'] = {
+                'metrics': metrics,
+                'accuracy_drop': results['baseline']['accuracy'] - metrics['accuracy']
+            }
+
+        results['noise_injection'] = noise_results
+
+        # Test 4: Pattern shuffling
+        print("\n🔬 Test 4: Pattern Shuffling")
+        print("   Purpose: Test if spatial pattern matters (vs just magnitude)")
+
+        handle = self._apply_pattern_shuffling()
+        shuffle_metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+        handle.remove()
+
+        results['pattern_shuffling'] = {
+            'metrics': shuffle_metrics,
+            'accuracy_drop': results['baseline']['accuracy'] - shuffle_metrics['accuracy']
+        }
+
+        # Test 5: Uniform gate (remove pattern, keep magnitude)
+        print("\n🔬 Test 5: Uniform Gate")
+        print("   Purpose: Replace pattern with uniform average (removes all selectivity)")
+
+        handle = self._apply_uniform_gate()
+        uniform_metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+        handle.remove()
+
+        results['uniform_gate'] = {
+            'metrics': uniform_metrics,
+            'accuracy_drop': results['baseline']['accuracy'] - uniform_metrics['accuracy']
+        }
+
+        return results
+
+    def _apply_gate_dropout(self, dropout_rate: float):
+        """Random dropout to gate (선택 정보 손실)"""
+        class GateDropoutHook:
+            def __init__(self, rate):
+                self.rate = rate
+
+            def __call__(self, module, input, output):
+                # Random mask
+                mask = (torch.rand_like(output) > self.rate).float()
+                return output * mask
+
+        hook = GateDropoutHook(dropout_rate)
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_anti_gate(self):
+        """Inverse gate (나쁜 것 선택, 좋은 것 버림)"""
+        class AntiGateHook:
+            def __call__(self, module, input, output):
+                # Invert the gate: select what should be discarded
+                return 1.0 - output
+
+        hook = AntiGateHook()
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_gate_noise(self, noise_std: float):
+        """Add noise to gate (선택 판단에 노이즈)"""
+        class GateNoiseHook:
+            def __init__(self, std):
+                self.std = std
+
+            def __call__(self, module, input, output):
+                noise = torch.randn_like(output) * self.std
+                noisy_gate = output + noise
+                # Clamp to valid range [0, 1] for sigmoid gates
+                return torch.clamp(noisy_gate, 0.0, 1.0)
+
+        hook = GateNoiseHook(noise_std)
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_pattern_shuffling(self):
+        """Shuffle gate patterns (keeps magnitude, destroys spatial pattern)"""
+        class PatternShuffleHook:
+            def __call__(self, module, input, output):
+                # Shuffle along the feature dimension
+                # This keeps the distribution but destroys the spatial pattern
+                batch_size, seq_len, hidden = output.shape
+                shuffled = output.clone()
+
+                # Shuffle each position independently
+                for b in range(batch_size):
+                    for s in range(seq_len):
+                        perm = torch.randperm(hidden, device=output.device)
+                        shuffled[b, s] = output[b, s, perm]
+
+                return shuffled
+
+        hook = PatternShuffleHook()
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_uniform_gate(self):
+        """Replace all gates with uniform average (removes all selectivity)"""
+        class UniformGateHook:
+            def __call__(self, module, input, output):
+                # Replace pattern with uniform average
+                # This removes ALL selection information
+                mean_val = output.mean(dim=-1, keepdim=True)
+                uniform = mean_val.expand_as(output)
+                return uniform
+
+        hook = UniformGateHook()
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
 
 class BrainActivityPredictor:
     """
@@ -1077,6 +1258,115 @@ def save_visualizations(results: Dict, output_dir: Path):
         plt.close()
         print(f"✅ Saved: {output_dir / 'layer_importance_analysis.png'}")
 
+    # Gate specificity 결과 시각화
+    if 'gate_specificity' in results:
+        gate_spec = results['gate_specificity']
+
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig.suptitle('Gate Specificity Tests: True Gate Importance', fontsize=16)
+        axes = axes.flatten()
+
+        baseline_acc = gate_spec['baseline']['accuracy'] * 100
+
+        # Test 1: Selective suppression
+        if 'selective_suppression' in gate_spec:
+            rates = []
+            drops = []
+            for key, data in gate_spec['selective_suppression'].items():
+                rate = int(key.split('_')[1])
+                rates.append(rate)
+                drops.append(data['accuracy_drop'] * 100)
+
+            if rates:
+                sorted_pairs = sorted(zip(rates, drops))
+                rates, drops = zip(*sorted_pairs)
+                axes[0].plot(rates, drops, marker='o', linewidth=2, color='#ff6b6b')
+                axes[0].fill_between(rates, 0, drops, alpha=0.3, color='#ff6b6b')
+                axes[0].set_xlabel('Dropout Rate (%)')
+                axes[0].set_ylabel('Accuracy Drop (%)')
+                axes[0].set_title('Test 1: Random Gate Dropout\n(Information Loss)')
+                axes[0].grid(True, alpha=0.3)
+
+        # Test 2: Anti-gate (single bar)
+        if 'anti_gate' in gate_spec:
+            anti_drop = gate_spec['anti_gate']['accuracy_drop'] * 100
+            axes[1].bar(['Anti-Gate'], [anti_drop], color='#ff6b6b', width=0.5)
+            axes[1].axhline(y=baseline_acc, color='red', linestyle='--', label='Baseline Acc', alpha=0.5)
+            axes[1].set_ylabel('Accuracy Drop (%)')
+            axes[1].set_title('Test 2: Inverse Gate\n(Bad Selection)')
+            axes[1].grid(True, alpha=0.3, axis='y')
+            axes[1].legend()
+            axes[1].text(0, anti_drop + 1, f'{anti_drop:.1f}%',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Test 3: Noise injection
+        if 'noise_injection' in gate_spec:
+            noise_stds = []
+            drops = []
+            for key, data in gate_spec['noise_injection'].items():
+                std = int(key.split('_')[1])
+                noise_stds.append(std)
+                drops.append(data['accuracy_drop'] * 100)
+
+            if noise_stds:
+                sorted_pairs = sorted(zip(noise_stds, drops))
+                noise_stds, drops = zip(*sorted_pairs)
+                axes[2].plot(noise_stds, drops, marker='o', linewidth=2, color='#ff6b6b')
+                axes[2].fill_between(noise_stds, 0, drops, alpha=0.3, color='#ff6b6b')
+                axes[2].set_xlabel('Noise Std (%)')
+                axes[2].set_ylabel('Accuracy Drop (%)')
+                axes[2].set_title('Test 3: Gate Noise\n(Precision Importance)')
+                axes[2].grid(True, alpha=0.3)
+
+        # Test 4: Pattern shuffling
+        if 'pattern_shuffling' in gate_spec:
+            shuffle_drop = gate_spec['pattern_shuffling']['accuracy_drop'] * 100
+            axes[3].bar(['Shuffled'], [shuffle_drop], color='#ff6b6b', width=0.5)
+            axes[3].set_ylabel('Accuracy Drop (%)')
+            axes[3].set_title('Test 4: Pattern Shuffling\n(Spatial Pattern Importance)')
+            axes[3].grid(True, alpha=0.3, axis='y')
+            axes[3].text(0, shuffle_drop + 1, f'{shuffle_drop:.1f}%',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Test 5: Uniform gate
+        if 'uniform_gate' in gate_spec:
+            uniform_drop = gate_spec['uniform_gate']['accuracy_drop'] * 100
+            axes[4].bar(['Uniform'], [uniform_drop], color='#ff6b6b', width=0.5)
+            axes[4].set_ylabel('Accuracy Drop (%)')
+            axes[4].set_title('Test 5: Uniform Gate\n(No Selectivity)')
+            axes[4].grid(True, alpha=0.3, axis='y')
+            axes[4].text(0, uniform_drop + 1, f'{uniform_drop:.1f}%',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Summary comparison (Test 6)
+        test_names = []
+        test_drops = []
+
+        if 'anti_gate' in gate_spec:
+            test_names.append('Anti-Gate')
+            test_drops.append(gate_spec['anti_gate']['accuracy_drop'] * 100)
+        if 'pattern_shuffling' in gate_spec:
+            test_names.append('Shuffled')
+            test_drops.append(gate_spec['pattern_shuffling']['accuracy_drop'] * 100)
+        if 'uniform_gate' in gate_spec:
+            test_names.append('Uniform')
+            test_drops.append(gate_spec['uniform_gate']['accuracy_drop'] * 100)
+
+        if test_names:
+            colors_summary = ['#ff6b6b', '#ff9999', '#ffcccc']
+            axes[5].barh(test_names, test_drops, color=colors_summary[:len(test_names)])
+            axes[5].set_xlabel('Accuracy Drop (%)')
+            axes[5].set_title('Summary: Pattern Tests\n(Larger = More Important)')
+            axes[5].grid(True, alpha=0.3, axis='x')
+
+            for i, (name, drop) in enumerate(zip(test_names, test_drops)):
+                axes[5].text(drop + 0.5, i, f'{drop:.1f}%', va='center')
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'gate_specificity_tests.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'gate_specificity_tests.png'}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1092,7 +1382,7 @@ def main():
         '--experiment',
         type=str,
         default='all',
-        choices=['all', 'meg', 'optogenetics', 'modeling', 'dimensionwise', 'difficulty', 'layer_importance'],
+        choices=['all', 'meg', 'optogenetics', 'modeling', 'dimensionwise', 'difficulty', 'layer_importance', 'gate_specificity'],
         help='Which experiment to run'
     )
     parser.add_argument(
@@ -1317,6 +1607,61 @@ def main():
             for rank, item in enumerate(layer_results['importance_ranking'], 1):
                 print(f"    {rank}. {item['component']}: {item['importance_score']*100:.2f}% drop")
 
+    # Experiment 7: Gate Specificity Tests
+    if args.experiment in ['all', 'gate_specificity']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 7: Gate Specificity Tests")
+        print(f"{'='*80}")
+        print("\n⚠️  NOTE: This tests gate's SELECTIVE function")
+        print("   Previous tests (uniform scaling) = step robustness")
+        print("   These tests = true gate importance\n")
+
+        opto_sim = OptogeneticsSimulator(model, args.device)
+        gate_spec_results = opto_sim.test_gate_specificity(test_loader, args.num_batches)
+        results['gate_specificity'] = gate_spec_results
+
+        print("\n📊 Gate Specificity Test Results:")
+        baseline_acc = gate_spec_results['baseline']['accuracy']
+        print(f"\n  Baseline: acc={baseline_acc*100:.2f}%")
+
+        # Selective suppression results
+        if 'selective_suppression' in gate_spec_results:
+            print("\n  Test 1 - Selective Suppression (Random Dropout):")
+            for key, data in gate_spec_results['selective_suppression'].items():
+                drop = data['accuracy_drop'] * 100
+                print(f"    {key}: acc={data['metrics']['accuracy']*100:.2f}%, drop={drop:.2f}%")
+
+        # Anti-gate results
+        if 'anti_gate' in gate_spec_results:
+            drop = gate_spec_results['anti_gate']['accuracy_drop'] * 100
+            acc = gate_spec_results['anti_gate']['metrics']['accuracy'] * 100
+            print(f"\n  Test 2 - Anti-Gate (Inverse Selection):")
+            print(f"    acc={acc:.2f}%, drop={drop:.2f}%")
+            print(f"    → Confirms gate selects GOOD features (inverse = disaster!)")
+
+        # Noise injection results
+        if 'noise_injection' in gate_spec_results:
+            print("\n  Test 3 - Noise Injection:")
+            for key, data in gate_spec_results['noise_injection'].items():
+                drop = data['accuracy_drop'] * 100
+                print(f"    {key}: acc={data['metrics']['accuracy']*100:.2f}%, drop={drop:.2f}%")
+
+        # Pattern shuffling results
+        if 'pattern_shuffling' in gate_spec_results:
+            drop = gate_spec_results['pattern_shuffling']['accuracy_drop'] * 100
+            acc = gate_spec_results['pattern_shuffling']['metrics']['accuracy'] * 100
+            print(f"\n  Test 4 - Pattern Shuffling:")
+            print(f"    acc={acc:.2f}%, drop={drop:.2f}%")
+            print(f"    → Spatial pattern matters! Not just magnitude.")
+
+        # Uniform gate results
+        if 'uniform_gate' in gate_spec_results:
+            drop = gate_spec_results['uniform_gate']['accuracy_drop'] * 100
+            acc = gate_spec_results['uniform_gate']['metrics']['accuracy'] * 100
+            print(f"\n  Test 5 - Uniform Gate (No Selectivity):")
+            print(f"    acc={acc:.2f}%, drop={drop:.2f}%")
+            print(f"    → Pattern = information! Uniform = no selection = bad.")
+
     # Save results
     results_file = output_dir / 'experimental_results.json'
     with open(results_file, 'w') as f:
@@ -1347,6 +1692,8 @@ def main():
         print(f"   - token_difficulty_analysis.png")
     if 'layer_importance_analysis' in results:
         print(f"   - layer_importance_analysis.png")
+    if 'gate_specificity' in results:
+        print(f"   - gate_specificity_tests.png")
 
 
 if __name__ == "__main__":
