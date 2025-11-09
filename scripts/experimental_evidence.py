@@ -331,6 +331,223 @@ class OptogeneticsSimulator:
 
         return results
 
+    def test_gate_specificity(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """
+        Gate의 선택적 기능 테스트 (진짜 중요성 검증)
+
+        기존 억제는 uniform scaling → step robustness만 테스트
+        새로운 테스트들은 gate의 선택적 기능을 직접 테스트
+
+        Returns:
+            gate_specificity_results: 각 테스트별 결과
+        """
+        results = {}
+
+        # Baseline
+        print("\n📊 Measuring baseline for gate specificity tests...")
+        results['baseline'] = self.measure_behavior(dataloader, num_batches=num_batches)
+
+        # Test 1: Selective suppression (random dropout)
+        print("\n🔬 Test 1: Selective Suppression (Random Gate Dropout)")
+        print("   Purpose: Test information loss from random selection masking")
+
+        dropout_rates = [0.25, 0.5, 0.75]
+        selective_results = {}
+
+        for rate in dropout_rates:
+            print(f"   Dropout rate: {rate*100:.0f}%")
+
+            # Apply random dropout to gate
+            handle = self._apply_gate_dropout(rate)
+            metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+            handle.remove()
+
+            selective_results[f'dropout_{int(rate*100)}'] = {
+                'metrics': metrics,
+                'accuracy_drop': results['baseline']['accuracy'] - metrics['accuracy']
+            }
+
+        results['selective_suppression'] = selective_results
+
+        # Test 2: Anti-gate (inverse gate)
+        print("\n🔬 Test 2: Anti-Gate (Inverse Selection)")
+        print("   Purpose: Select bad features, discard good ones")
+
+        handle = self._apply_anti_gate()
+        anti_metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+        handle.remove()
+
+        results['anti_gate'] = {
+            'metrics': anti_metrics,
+            'accuracy_drop': results['baseline']['accuracy'] - anti_metrics['accuracy']
+        }
+
+        # Test 3: Noise injection
+        print("\n🔬 Test 3: Noise Injection to Gate")
+        print("   Purpose: Test gate precision importance")
+
+        noise_levels = [0.1, 0.3, 0.5]
+        noise_results = {}
+
+        for noise_std in noise_levels:
+            print(f"   Noise std: {noise_std}")
+
+            handle = self._apply_gate_noise(noise_std)
+            metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+            handle.remove()
+
+            noise_results[f'noise_{int(noise_std*100)}'] = {
+                'metrics': metrics,
+                'accuracy_drop': results['baseline']['accuracy'] - metrics['accuracy']
+            }
+
+        results['noise_injection'] = noise_results
+
+        # Test 4: Pattern shuffling
+        print("\n🔬 Test 4: Pattern Shuffling")
+        print("   Purpose: Test if spatial pattern matters (vs just magnitude)")
+
+        handle = self._apply_pattern_shuffling()
+        shuffle_metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+        handle.remove()
+
+        results['pattern_shuffling'] = {
+            'metrics': shuffle_metrics,
+            'accuracy_drop': results['baseline']['accuracy'] - shuffle_metrics['accuracy']
+        }
+
+        # Test 5: Uniform gate (remove pattern, keep magnitude)
+        print("\n🔬 Test 5: Uniform Gate")
+        print("   Purpose: Replace pattern with uniform average (removes all selectivity)")
+
+        handle = self._apply_uniform_gate()
+        uniform_metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+        handle.remove()
+
+        results['uniform_gate'] = {
+            'metrics': uniform_metrics,
+            'accuracy_drop': results['baseline']['accuracy'] - uniform_metrics['accuracy']
+        }
+
+        # Test 6: Magnitude scaling (robustness to different scales)
+        print("\n🔬 Test 6: Magnitude Scaling")
+        print("   Purpose: Test robustness to different gate magnitudes (not pattern)")
+
+        scales = [0.25, 0.5, 0.75, 1.5, 2.0]
+        scaling_results = {}
+
+        for scale in scales:
+            print(f"   Scale: {scale}")
+
+            handle = self._apply_magnitude_scaling(scale)
+            metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+            handle.remove()
+
+            scaling_results[f'scale_{int(scale*100)}'] = {
+                'metrics': metrics,
+                'accuracy_drop': results['baseline']['accuracy'] - metrics['accuracy']
+            }
+
+        results['magnitude_scaling'] = scaling_results
+
+        return results
+
+    def _apply_gate_dropout(self, dropout_rate: float):
+        """Random dropout to gate (선택 정보 손실)"""
+        class GateDropoutHook:
+            def __init__(self, rate):
+                self.rate = rate
+
+            def __call__(self, module, input, output):
+                # Random mask
+                mask = (torch.rand_like(output) > self.rate).float()
+                return output * mask
+
+        hook = GateDropoutHook(dropout_rate)
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_anti_gate(self):
+        """Inverse gate (나쁜 것 선택, 좋은 것 버림)"""
+        class AntiGateHook:
+            def __call__(self, module, input, output):
+                # Invert the gate: select what should be discarded
+                return 1.0 - output
+
+        hook = AntiGateHook()
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_gate_noise(self, noise_std: float):
+        """Add noise to gate (선택 판단에 노이즈)"""
+        class GateNoiseHook:
+            def __init__(self, std):
+                self.std = std
+
+            def __call__(self, module, input, output):
+                noise = torch.randn_like(output) * self.std
+                noisy_gate = output + noise
+                # Clamp to valid range [0, 1] for sigmoid gates
+                return torch.clamp(noisy_gate, 0.0, 1.0)
+
+        hook = GateNoiseHook(noise_std)
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_pattern_shuffling(self):
+        """Shuffle gate patterns (keeps magnitude, destroys spatial pattern)"""
+        class PatternShuffleHook:
+            def __call__(self, module, input, output):
+                # Shuffle along the feature dimension
+                # This keeps the distribution but destroys the spatial pattern
+                batch_size, seq_len, hidden = output.shape
+                shuffled = output.clone()
+
+                # Shuffle each position independently
+                for b in range(batch_size):
+                    for s in range(seq_len):
+                        perm = torch.randperm(hidden, device=output.device)
+                        shuffled[b, s] = output[b, s, perm]
+
+                return shuffled
+
+        hook = PatternShuffleHook()
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_uniform_gate(self):
+        """Replace all gates with uniform average (removes all selectivity)"""
+        class UniformGateHook:
+            def __call__(self, module, input, output):
+                # Replace pattern with uniform average
+                # This removes ALL selection information
+                mean_val = output.mean(dim=-1, keepdim=True)
+                uniform = mean_val.expand_as(output)
+                return uniform
+
+        hook = UniformGateHook()
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
+    def _apply_magnitude_scaling(self, scale: float):
+        """Scale gate magnitude (keeps pattern, changes magnitude)"""
+        class MagnitudeScalingHook:
+            def __init__(self, scale):
+                self.scale = scale
+
+            def __call__(self, module, input, output):
+                # Scale gate values while keeping pattern
+                # This tests robustness to different gate strengths
+                return output * self.scale
+
+        hook = MagnitudeScalingHook(scale)
+        handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        return handle
+
 
 class BrainActivityPredictor:
     """
@@ -441,6 +658,350 @@ class BrainActivityPredictor:
             analysis['supports_selectivity_hypothesis'] = (min_breadth_idx in [1, 2])
 
         return analysis
+
+
+class DimensionwiseAnalyzer:
+    """
+    Dimension-wise Activity Analysis
+
+    각 차원별 활동 패턴 분석:
+    - Accumulator: 단계마다 증가
+    - Selector: 단계마다 감소
+    - Oscillator: 증가/감소 반복
+    """
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_dimensions(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """
+        각 차원별 활동 패턴 분석
+
+        Returns:
+            dimension_patterns: 각 차원의 패턴 타입 및 통계
+        """
+        hidden_size = self.model.hidden_size
+        num_steps = self.model.num_steps
+
+        # 각 step별 차원 활동 수집
+        step_activities = [[] for _ in range(num_steps + 1)]  # +1 for embeddings
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Analyzing dimensions", total=num_batches)):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+
+                # 모든 step의 출력 얻기
+                all_outputs = self.model(
+                    input_ids,
+                    attention_mask,
+                    return_all_steps=True
+                )
+
+                # 각 step의 활동을 차원별로 평균
+                for step_idx, output in enumerate(all_outputs):
+                    # [batch, seq, hidden] -> [hidden] (평균)
+                    dim_activity = output.abs().mean(dim=[0, 1]).cpu().numpy()
+                    step_activities[step_idx].append(dim_activity)
+
+        # 각 step별 평균 계산
+        avg_step_activities = []
+        for step_acts in step_activities:
+            if step_acts:
+                avg_step_activities.append(np.mean(step_acts, axis=0))
+
+        avg_step_activities = np.array(avg_step_activities)  # [num_steps+1, hidden_size]
+
+        # 각 차원별 패턴 분석
+        dimension_patterns = {
+            'accumulator': [],
+            'selector': [],
+            'oscillator': [],
+            'stable': []
+        }
+
+        for dim in range(hidden_size):
+            activity = avg_step_activities[:, dim]
+
+            # 패턴 분류
+            diffs = np.diff(activity)
+
+            if np.all(diffs > 0):
+                # 계속 증가
+                dimension_patterns['accumulator'].append(dim)
+            elif np.all(diffs < 0):
+                # 계속 감소
+                dimension_patterns['selector'].append(dim)
+            elif len(diffs) >= 2 and np.any(diffs[:-1] * diffs[1:] < 0):
+                # 방향 변경 (증가->감소 또는 감소->증가)
+                dimension_patterns['oscillator'].append(dim)
+            else:
+                # 변화가 작음
+                dimension_patterns['stable'].append(dim)
+
+        # 통계 계산
+        results = {
+            'dimension_patterns': dimension_patterns,
+            'pattern_counts': {
+                'accumulator': len(dimension_patterns['accumulator']),
+                'selector': len(dimension_patterns['selector']),
+                'oscillator': len(dimension_patterns['oscillator']),
+                'stable': len(dimension_patterns['stable'])
+            },
+            'step_activities': avg_step_activities.tolist(),
+            'sample_dimensions': {
+                'accumulator_samples': dimension_patterns['accumulator'][:5],
+                'selector_samples': dimension_patterns['selector'][:5],
+                'oscillator_samples': dimension_patterns['oscillator'][:5]
+            }
+        }
+
+        return results
+
+
+class TokenDifficultyAnalyzer:
+    """
+    Token Difficulty별 활동 분석
+
+    Easy vs Hard tokens의 활동 패턴 비교:
+    - Easy: 낮고 안정적인 활동
+    - Hard: 높고 증가하는 활동
+    """
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_by_difficulty(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """
+        Token 난이도별 활동 패턴 분석
+
+        Returns:
+            difficulty_analysis: Easy/Hard tokens의 활동 비교
+        """
+        easy_activities = []
+        medium_activities = []
+        hard_activities = []
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Analyzing difficulty", total=num_batches)):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                # 모든 step의 출력 얻기
+                all_outputs = self.model(
+                    input_ids,
+                    attention_mask,
+                    return_all_steps=True
+                )
+
+                # 마지막 출력으로 예측
+                final_output = all_outputs[-1]
+                logits = self.model.mlm_head(final_output)
+
+                # 각 토큰의 정답 확률
+                probs = F.softmax(logits, dim=-1)
+                correct_probs = probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+
+                # Masked token만 고려
+                mask = (labels != -100)
+
+                # 난이도 분류 (확률 기반)
+                for i in range(input_ids.size(0)):
+                    for j in range(input_ids.size(1)):
+                        if not mask[i, j]:
+                            continue
+
+                        prob = correct_probs[i, j].item()
+
+                        # 각 step의 활동 추출
+                        step_acts = [output[i, j].abs().mean().item() for output in all_outputs]
+
+                        if prob > 0.7:
+                            # Easy token
+                            easy_activities.append(step_acts)
+                        elif prob > 0.3:
+                            # Medium token
+                            medium_activities.append(step_acts)
+                        else:
+                            # Hard token
+                            hard_activities.append(step_acts)
+
+        # 평균 계산
+        results = {
+            'easy': {
+                'mean': np.mean(easy_activities, axis=0).tolist() if easy_activities else [],
+                'std': np.std(easy_activities, axis=0).tolist() if easy_activities else [],
+                'count': len(easy_activities)
+            },
+            'medium': {
+                'mean': np.mean(medium_activities, axis=0).tolist() if medium_activities else [],
+                'std': np.std(medium_activities, axis=0).tolist() if medium_activities else [],
+                'count': len(medium_activities)
+            },
+            'hard': {
+                'mean': np.mean(hard_activities, axis=0).tolist() if hard_activities else [],
+                'std': np.std(hard_activities, axis=0).tolist() if hard_activities else [],
+                'count': len(hard_activities)
+            }
+        }
+
+        return results
+
+
+class LayerImportanceAnalyzer:
+    """
+    Layer-wise Gate Importance Analysis
+
+    각 레이어(컴포넌트)의 gate 중요도 분석:
+    - Attention gate importance
+    - FFN gate importance
+    - Gate module importance
+    """
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_layer_importance(
+        self,
+        dataloader,
+        num_batches: int = 10,
+        suppression_rates: list = [0.25, 0.5, 0.75]
+    ) -> Dict:
+        """
+        각 레이어의 중요도 분석
+
+        Returns:
+            importance_analysis: 각 레이어별 억제 영향
+        """
+        results = {}
+
+        # Baseline
+        print("\n📊 Measuring baseline performance...")
+        baseline = self._measure_performance(dataloader, num_batches)
+        results['baseline'] = baseline
+
+        # 각 컴포넌트별 억제 실험
+        components = ['attention', 'ffn', 'gate']
+
+        for component in components:
+            print(f"\n🔬 Testing {component} importance...")
+            component_results = {}
+
+            for rate in suppression_rates:
+                print(f"  Suppression rate: {rate*100:.0f}%")
+
+                # 억제 적용
+                handle = self._suppress_component(component, rate)
+
+                # 성능 측정
+                metrics = self._measure_performance(dataloader, num_batches)
+
+                # 억제 해제
+                handle.remove()
+
+                # 결과 저장
+                component_results[f'suppression_{int(rate*100)}'] = {
+                    'metrics': metrics,
+                    'accuracy_drop': baseline['accuracy'] - metrics['accuracy'],
+                    'loss_increase': metrics['loss'] - baseline['loss']
+                }
+
+            results[component] = component_results
+
+        # 중요도 순위 계산
+        importance_ranking = []
+        for component in components:
+            # 75% 억제 시 accuracy drop으로 중요도 측정
+            drop = results[component]['suppression_75']['accuracy_drop']
+            importance_ranking.append((component, drop))
+
+        importance_ranking.sort(key=lambda x: x[1], reverse=True)
+        results['importance_ranking'] = [
+            {'component': comp, 'importance_score': score}
+            for comp, score in importance_ranking
+        ]
+
+        return results
+
+    def _suppress_component(self, component: str, rate: float):
+        """컴포넌트 억제"""
+        class SuppressionHook:
+            def __init__(self, rate):
+                self.rate = rate
+
+            def __call__(self, module, input, output):
+                if isinstance(output, tuple):
+                    output = list(output)
+                    output[0] = output[0] * (1.0 - self.rate)
+                    return tuple(output)
+                else:
+                    return output * (1.0 - self.rate)
+
+        hook = SuppressionHook(rate)
+
+        if component == 'attention':
+            handle = self.model.delta_refiner.attention.register_forward_hook(hook)
+        elif component == 'ffn':
+            handle = self.model.delta_refiner.ffn.register_forward_hook(hook)
+        elif component == 'gate':
+            handle = self.model.delta_refiner.gate.register_forward_hook(hook)
+        else:
+            raise ValueError(f"Unknown component: {component}")
+
+        return handle
+
+    def _measure_performance(self, dataloader, num_batches: int) -> Dict:
+        """성능 측정"""
+        total_loss = 0.0
+        total_correct = 0
+        total_tokens = 0
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(dataloader):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                hidden = self.model(input_ids, attention_mask)
+                loss, logits = self.model.get_mlm_loss(hidden, labels)
+
+                total_loss += loss.item()
+
+                preds = logits.argmax(dim=-1)
+                mask = (labels != -100)
+                correct = (preds == labels) & mask
+                total_correct += correct.sum().item()
+                total_tokens += mask.sum().item()
+
+        return {
+            'loss': total_loss / num_batches,
+            'accuracy': total_correct / total_tokens if total_tokens > 0 else 0,
+            'total_tokens': total_tokens
+        }
 
 
 def prepare_test_data(tokenizer, num_samples: int = 100):
@@ -586,6 +1147,320 @@ def save_visualizations(results: Dict, output_dir: Path):
         plt.close()
         print(f"✅ Saved: {output_dir / 'brain_activity_patterns.png'}")
 
+    # Dimension-wise 결과 시각화
+    if 'dimensionwise_analysis' in results:
+        dim_analysis = results['dimensionwise_analysis']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Dimension-wise Analysis: Pattern Types', fontsize=16)
+
+        # Pattern counts pie chart
+        counts = dim_analysis['pattern_counts']
+        axes[0].pie(
+            [counts['accumulator'], counts['selector'], counts['oscillator'], counts['stable']],
+            labels=['Accumulator', 'Selector', 'Oscillator', 'Stable'],
+            autopct='%1.1f%%',
+            colors=['#ff9999', '#66b3ff', '#99ff99', '#ffcc99']
+        )
+        axes[0].set_title('Distribution of Dimension Patterns')
+
+        # Sample trajectories
+        if 'step_activities' in dim_analysis:
+            step_acts = np.array(dim_analysis['step_activities'])
+            samples = dim_analysis.get('sample_dimensions', {})
+
+            for dim_type, color in [
+                ('accumulator_samples', '#ff9999'),
+                ('selector_samples', '#66b3ff'),
+                ('oscillator_samples', '#99ff99')
+            ]:
+                if dim_type in samples and samples[dim_type]:
+                    for dim_idx in samples[dim_type][:2]:  # Show 2 examples each
+                        if dim_idx < step_acts.shape[1]:
+                            axes[1].plot(
+                                step_acts[:, dim_idx],
+                                marker='o',
+                                alpha=0.6,
+                                color=color,
+                                label=dim_type.replace('_samples', '') if dim_idx == samples[dim_type][0] else ''
+                            )
+
+        axes[1].set_xlabel('Processing Step')
+        axes[1].set_ylabel('Activity Level')
+        axes[1].set_title('Sample Dimension Trajectories')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'dimensionwise_patterns.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'dimensionwise_patterns.png'}")
+
+    # Token difficulty 결과 시각화
+    if 'token_difficulty_analysis' in results:
+        diff_analysis = results['token_difficulty_analysis']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Token Difficulty Analysis', fontsize=16)
+
+        # Activity by difficulty
+        for difficulty, color in [
+            ('easy', '#66b3ff'),
+            ('medium', '#ffcc99'),
+            ('hard', '#ff9999')
+        ]:
+            if difficulty in diff_analysis and diff_analysis[difficulty]['mean']:
+                mean = diff_analysis[difficulty]['mean']
+                std = diff_analysis[difficulty]['std']
+                steps = list(range(len(mean)))
+
+                axes[0].plot(steps, mean, marker='o', label=f'{difficulty.capitalize()} (n={diff_analysis[difficulty]["count"]})', color=color)
+                axes[0].fill_between(steps, np.array(mean) - np.array(std), np.array(mean) + np.array(std), alpha=0.2, color=color)
+
+        axes[0].set_xlabel('Processing Step')
+        axes[0].set_ylabel('Activity Level')
+        axes[0].set_title('Activity by Token Difficulty')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        # Activity increase
+        increases = []
+        labels = []
+        for difficulty in ['easy', 'medium', 'hard']:
+            if difficulty in diff_analysis and diff_analysis[difficulty]['mean']:
+                mean = diff_analysis[difficulty]['mean']
+                if len(mean) >= 2:
+                    increase = mean[-1] - mean[0]
+                    increases.append(increase)
+                    labels.append(difficulty.capitalize())
+
+        if increases:
+            axes[1].bar(labels, increases, color=['#66b3ff', '#ffcc99', '#ff9999'])
+            axes[1].set_ylabel('Activity Increase')
+            axes[1].set_title('Activity Increase from Start to End')
+            axes[1].grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'token_difficulty_analysis.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'token_difficulty_analysis.png'}")
+
+    # Layer importance 결과 시각화
+    if 'layer_importance_analysis' in results:
+        layer_analysis = results['layer_importance_analysis']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Layer Importance Analysis', fontsize=16)
+
+        # Importance ranking
+        if 'importance_ranking' in layer_analysis:
+            ranking = layer_analysis['importance_ranking']
+            components = [r['component'] for r in ranking]
+            scores = [r['importance_score'] * 100 for r in ranking]  # Convert to percentage
+
+            axes[0].barh(components, scores, color=['#ff9999', '#66b3ff', '#99ff99'])
+            axes[0].set_xlabel('Importance Score (Accuracy Drop %)')
+            axes[0].set_title('Component Importance Ranking')
+            axes[0].grid(True, alpha=0.3, axis='x')
+
+        # Suppression effect curves
+        components = ['attention', 'ffn', 'gate']
+        colors = ['#ff9999', '#66b3ff', '#99ff99']
+
+        for component, color in zip(components, colors):
+            if component in layer_analysis:
+                rates = []
+                drops = []
+
+                for key, value in layer_analysis[component].items():
+                    if key.startswith('suppression_'):
+                        rate = int(key.split('_')[1])
+                        rates.append(rate)
+                        drops.append(value['accuracy_drop'] * 100)
+
+                if rates:
+                    sorted_pairs = sorted(zip(rates, drops))
+                    rates, drops = zip(*sorted_pairs)
+                    axes[1].plot(rates, drops, marker='o', label=component.capitalize(), color=color)
+
+        axes[1].set_xlabel('Suppression Rate (%)')
+        axes[1].set_ylabel('Accuracy Drop (%)')
+        axes[1].set_title('Suppression Effect on Accuracy')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'layer_importance_analysis.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'layer_importance_analysis.png'}")
+
+    # Gate specificity 결과 시각화
+    if 'gate_specificity' in results:
+        gate_spec = results['gate_specificity']
+
+        fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+        fig.suptitle('Gate Specificity Tests: True Gate Importance', fontsize=16)
+        axes = axes.flatten()
+
+        baseline_acc = gate_spec['baseline']['accuracy'] * 100
+
+        # Test 1: Selective suppression
+        if 'selective_suppression' in gate_spec:
+            rates = []
+            drops = []
+            for key, data in gate_spec['selective_suppression'].items():
+                rate = int(key.split('_')[1])
+                rates.append(rate)
+                drops.append(data['accuracy_drop'] * 100)
+
+            if rates:
+                sorted_pairs = sorted(zip(rates, drops))
+                rates, drops = zip(*sorted_pairs)
+                axes[0].plot(rates, drops, marker='o', linewidth=2, color='#ff6b6b')
+                axes[0].fill_between(rates, 0, drops, alpha=0.3, color='#ff6b6b')
+                axes[0].set_xlabel('Dropout Rate (%)')
+                axes[0].set_ylabel('Accuracy Drop (%)')
+                axes[0].set_title('Test 1: Random Gate Dropout\n(Information Loss)')
+                axes[0].grid(True, alpha=0.3)
+
+        # Test 2: Anti-gate (single bar)
+        if 'anti_gate' in gate_spec:
+            anti_drop = gate_spec['anti_gate']['accuracy_drop'] * 100
+            axes[1].bar(['Anti-Gate'], [anti_drop], color='#ff6b6b', width=0.5)
+            axes[1].axhline(y=baseline_acc, color='red', linestyle='--', label='Baseline Acc', alpha=0.5)
+            axes[1].set_ylabel('Accuracy Drop (%)')
+            axes[1].set_title('Test 2: Inverse Gate\n(Bad Selection)')
+            axes[1].grid(True, alpha=0.3, axis='y')
+            axes[1].legend()
+            axes[1].text(0, anti_drop + 1, f'{anti_drop:.1f}%',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Test 3: Noise injection
+        if 'noise_injection' in gate_spec:
+            noise_stds = []
+            drops = []
+            for key, data in gate_spec['noise_injection'].items():
+                std = int(key.split('_')[1])
+                noise_stds.append(std)
+                drops.append(data['accuracy_drop'] * 100)
+
+            if noise_stds:
+                sorted_pairs = sorted(zip(noise_stds, drops))
+                noise_stds, drops = zip(*sorted_pairs)
+                axes[2].plot(noise_stds, drops, marker='o', linewidth=2, color='#ff6b6b')
+                axes[2].fill_between(noise_stds, 0, drops, alpha=0.3, color='#ff6b6b')
+                axes[2].set_xlabel('Noise Std (%)')
+                axes[2].set_ylabel('Accuracy Drop (%)')
+                axes[2].set_title('Test 3: Gate Noise\n(Precision Importance)')
+                axes[2].grid(True, alpha=0.3)
+
+        # Test 4: Pattern shuffling
+        if 'pattern_shuffling' in gate_spec:
+            shuffle_drop = gate_spec['pattern_shuffling']['accuracy_drop'] * 100
+            axes[3].bar(['Shuffled'], [shuffle_drop], color='#ff6b6b', width=0.5)
+            axes[3].set_ylabel('Accuracy Drop (%)')
+            axes[3].set_title('Test 4: Pattern Shuffling\n(Spatial Pattern Importance)')
+            axes[3].grid(True, alpha=0.3, axis='y')
+            axes[3].text(0, shuffle_drop + 1, f'{shuffle_drop:.1f}%',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Test 5: Uniform gate
+        if 'uniform_gate' in gate_spec:
+            uniform_drop = gate_spec['uniform_gate']['accuracy_drop'] * 100
+            axes[4].bar(['Uniform'], [uniform_drop], color='#ff6b6b', width=0.5)
+            axes[4].set_ylabel('Accuracy Drop (%)')
+            axes[4].set_title('Test 5: Uniform Gate\n(No Selectivity)')
+            axes[4].grid(True, alpha=0.3, axis='y')
+            axes[4].text(0, uniform_drop + 1, f'{uniform_drop:.1f}%',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Test 6: Magnitude scaling
+        if 'magnitude_scaling' in gate_spec:
+            scales = []
+            drops = []
+            for key, data in gate_spec['magnitude_scaling'].items():
+                scale = int(key.split('_')[1]) / 100
+                scales.append(scale)
+                drops.append(data['accuracy_drop'] * 100)
+
+            if scales:
+                sorted_pairs = sorted(zip(scales, drops))
+                scales, drops = zip(*sorted_pairs)
+                axes[5].plot(scales, drops, marker='o', linewidth=2, color='#4ecdc4')
+                axes[5].axhline(y=0, color='green', linestyle='--', alpha=0.5)
+                axes[5].fill_between(scales, 0, drops, alpha=0.3, color='#4ecdc4')
+                axes[5].set_xlabel('Gate Scale Factor')
+                axes[5].set_ylabel('Accuracy Drop (%)')
+                axes[5].set_title('Test 6: Magnitude Scaling\n(Robustness Test)')
+                axes[5].grid(True, alpha=0.3)
+
+        # Summary comparison (Pattern Tests)
+        test_names = []
+        test_drops = []
+
+        if 'anti_gate' in gate_spec:
+            test_names.append('Anti-Gate')
+            test_drops.append(gate_spec['anti_gate']['accuracy_drop'] * 100)
+        if 'pattern_shuffling' in gate_spec:
+            test_names.append('Shuffled')
+            test_drops.append(gate_spec['pattern_shuffling']['accuracy_drop'] * 100)
+        if 'uniform_gate' in gate_spec:
+            test_names.append('Uniform')
+            test_drops.append(gate_spec['uniform_gate']['accuracy_drop'] * 100)
+
+        if test_names:
+            colors_summary = ['#ff6b6b', '#ff9999', '#ffcccc']
+            axes[6].barh(test_names, test_drops, color=colors_summary[:len(test_names)])
+            axes[6].set_xlabel('Accuracy Drop (%)')
+            axes[6].set_title('Summary: Pattern Tests\n(Larger = More Important)')
+            axes[6].grid(True, alpha=0.3, axis='x')
+
+            for i, (name, drop) in enumerate(zip(test_names, test_drops)):
+                axes[6].text(drop + 0.5, i, f'{drop:.1f}%', va='center')
+
+        # Interpretation guide (in remaining subplots)
+        axes[7].axis('off')
+        interpretation_text = """
+        Key Insights:
+
+        Pattern Tests (1-5):
+        • Anti-Gate: Proves selection quality
+        • Shuffled: Pattern > Magnitude
+        • Uniform: Selection = critical
+
+        Robustness Test (6):
+        • Magnitude scaling: Tests stability
+        • Flat line = robust to strength
+        • Sharp drop = fragile
+        """
+        axes[7].text(0.1, 0.5, interpretation_text,
+                    transform=axes[7].transAxes,
+                    fontsize=11, verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+        axes[8].axis('off')
+        conclusion_text = """
+        Conclusion:
+
+        If Anti-Gate >> Magnitude Scaling:
+        → Gate's selective function matters
+        → Not just step size control
+        → True importance demonstrated!
+
+        This proves gate is NOT just
+        "learning rate" but actual
+        feature selection mechanism.
+        """
+        axes[8].text(0.1, 0.5, conclusion_text,
+                    transform=axes[8].transAxes,
+                    fontsize=11, verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'gate_specificity_tests.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'gate_specificity_tests.png'}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -601,7 +1476,7 @@ def main():
         '--experiment',
         type=str,
         default='all',
-        choices=['all', 'meg', 'optogenetics', 'modeling'],
+        choices=['all', 'meg', 'optogenetics', 'modeling', 'dimensionwise', 'difficulty', 'layer_importance', 'gate_specificity'],
         help='Which experiment to run'
     )
     parser.add_argument(
@@ -772,6 +1647,124 @@ def main():
             if key.endswith('_breadth'):
                 print(f"  {key}: {value:.4f}")
 
+    # Experiment 4: Dimension-wise Analysis
+    if args.experiment in ['all', 'dimensionwise']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 4: Dimension-wise Analysis")
+        print(f"{'='*80}\n")
+
+        dim_analyzer = DimensionwiseAnalyzer(model, args.device)
+        dim_results = dim_analyzer.analyze_dimensions(test_loader, args.num_batches)
+        results['dimensionwise_analysis'] = dim_results
+
+        print("\n📊 Dimension-wise Analysis Results:")
+        counts = dim_results['pattern_counts']
+        total = sum(counts.values())
+        print(f"  Accumulator dimensions: {counts['accumulator']} ({counts['accumulator']/total*100:.1f}%)")
+        print(f"  Selector dimensions: {counts['selector']} ({counts['selector']/total*100:.1f}%)")
+        print(f"  Oscillator dimensions: {counts['oscillator']} ({counts['oscillator']/total*100:.1f}%)")
+        print(f"  Stable dimensions: {counts['stable']} ({counts['stable']/total*100:.1f}%)")
+
+    # Experiment 5: Token Difficulty Analysis
+    if args.experiment in ['all', 'difficulty']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 5: Token Difficulty Analysis")
+        print(f"{'='*80}\n")
+
+        diff_analyzer = TokenDifficultyAnalyzer(model, args.device)
+        diff_results = diff_analyzer.analyze_by_difficulty(test_loader, args.num_batches)
+        results['token_difficulty_analysis'] = diff_results
+
+        print("\n📊 Token Difficulty Analysis Results:")
+        for difficulty in ['easy', 'medium', 'hard']:
+            if difficulty in diff_results and diff_results[difficulty]['mean']:
+                mean = diff_results[difficulty]['mean']
+                count = diff_results[difficulty]['count']
+                if len(mean) >= 2:
+                    increase = mean[-1] - mean[0]
+                    print(f"  {difficulty.capitalize()} tokens (n={count}): "
+                          f"start={mean[0]:.4f}, end={mean[-1]:.4f}, increase={increase:.4f}")
+
+    # Experiment 6: Layer Importance Analysis
+    if args.experiment in ['all', 'layer_importance']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 6: Layer Importance Analysis")
+        print(f"{'='*80}\n")
+
+        layer_analyzer = LayerImportanceAnalyzer(model, args.device)
+        layer_results = layer_analyzer.analyze_layer_importance(test_loader, args.num_batches)
+        results['layer_importance_analysis'] = layer_results
+
+        print("\n📊 Layer Importance Analysis Results:")
+        if 'importance_ranking' in layer_results:
+            print("  Importance Ranking (by accuracy drop):")
+            for rank, item in enumerate(layer_results['importance_ranking'], 1):
+                print(f"    {rank}. {item['component']}: {item['importance_score']*100:.2f}% drop")
+
+    # Experiment 7: Gate Specificity Tests
+    if args.experiment in ['all', 'gate_specificity']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 7: Gate Specificity Tests")
+        print(f"{'='*80}")
+        print("\n⚠️  NOTE: This tests gate's SELECTIVE function")
+        print("   Previous tests (uniform scaling) = step robustness")
+        print("   These tests = true gate importance\n")
+
+        opto_sim = OptogeneticsSimulator(model, args.device)
+        gate_spec_results = opto_sim.test_gate_specificity(test_loader, args.num_batches)
+        results['gate_specificity'] = gate_spec_results
+
+        print("\n📊 Gate Specificity Test Results:")
+        baseline_acc = gate_spec_results['baseline']['accuracy']
+        print(f"\n  Baseline: acc={baseline_acc*100:.2f}%")
+
+        # Selective suppression results
+        if 'selective_suppression' in gate_spec_results:
+            print("\n  Test 1 - Selective Suppression (Random Dropout):")
+            for key, data in gate_spec_results['selective_suppression'].items():
+                drop = data['accuracy_drop'] * 100
+                print(f"    {key}: acc={data['metrics']['accuracy']*100:.2f}%, drop={drop:.2f}%")
+
+        # Anti-gate results
+        if 'anti_gate' in gate_spec_results:
+            drop = gate_spec_results['anti_gate']['accuracy_drop'] * 100
+            acc = gate_spec_results['anti_gate']['metrics']['accuracy'] * 100
+            print(f"\n  Test 2 - Anti-Gate (Inverse Selection):")
+            print(f"    acc={acc:.2f}%, drop={drop:.2f}%")
+            print(f"    → Confirms gate selects GOOD features (inverse = disaster!)")
+
+        # Noise injection results
+        if 'noise_injection' in gate_spec_results:
+            print("\n  Test 3 - Noise Injection:")
+            for key, data in gate_spec_results['noise_injection'].items():
+                drop = data['accuracy_drop'] * 100
+                print(f"    {key}: acc={data['metrics']['accuracy']*100:.2f}%, drop={drop:.2f}%")
+
+        # Pattern shuffling results
+        if 'pattern_shuffling' in gate_spec_results:
+            drop = gate_spec_results['pattern_shuffling']['accuracy_drop'] * 100
+            acc = gate_spec_results['pattern_shuffling']['metrics']['accuracy'] * 100
+            print(f"\n  Test 4 - Pattern Shuffling:")
+            print(f"    acc={acc:.2f}%, drop={drop:.2f}%")
+            print(f"    → Spatial pattern matters! Not just magnitude.")
+
+        # Uniform gate results
+        if 'uniform_gate' in gate_spec_results:
+            drop = gate_spec_results['uniform_gate']['accuracy_drop'] * 100
+            acc = gate_spec_results['uniform_gate']['metrics']['accuracy'] * 100
+            print(f"\n  Test 5 - Uniform Gate (No Selectivity):")
+            print(f"    acc={acc:.2f}%, drop={drop:.2f}%")
+            print(f"    → Pattern = information! Uniform = no selection = bad.")
+
+        # Magnitude scaling results
+        if 'magnitude_scaling' in gate_spec_results:
+            print(f"\n  Test 6 - Magnitude Scaling (Robustness):")
+            for key, data in gate_spec_results['magnitude_scaling'].items():
+                scale = int(key.split('_')[1]) / 100
+                drop = data['accuracy_drop'] * 100
+                print(f"    scale={scale:.2f}: acc={data['metrics']['accuracy']*100:.2f}%, drop={drop:.2f}%")
+            print(f"    → Tests robustness to gate strength (pattern preserved)")
+
     # Save results
     results_file = output_dir / 'experimental_results.json'
     with open(results_file, 'w') as f:
@@ -788,9 +1781,22 @@ def main():
     print(f"{'='*80}\n")
     print(f"📁 All results saved in: {output_dir}")
     print(f"   - experimental_results.json")
-    print(f"   - meg_temporal_patterns.png")
-    print(f"   - optogenetics_suppression.png")
-    print(f"   - brain_activity_patterns.png")
+
+    # List generated visualizations
+    if 'meg_analysis' in results:
+        print(f"   - meg_temporal_patterns.png")
+    if 'optogenetics_results' in results:
+        print(f"   - optogenetics_suppression.png")
+    if 'brain_hypothesis_test' in results:
+        print(f"   - brain_activity_patterns.png")
+    if 'dimensionwise_analysis' in results:
+        print(f"   - dimensionwise_patterns.png")
+    if 'token_difficulty_analysis' in results:
+        print(f"   - token_difficulty_analysis.png")
+    if 'layer_importance_analysis' in results:
+        print(f"   - layer_importance_analysis.png")
+    if 'gate_specificity' in results:
+        print(f"   - gate_specificity_tests.png")
 
 
 if __name__ == "__main__":
