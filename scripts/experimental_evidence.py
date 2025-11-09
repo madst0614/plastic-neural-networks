@@ -1014,6 +1014,344 @@ class LayerImportanceAnalyzer:
         }
 
 
+class LayerwiseActivityAnalyzer:
+    """
+    Layer-wise Activity Analysis
+
+    각 레이어(스텝)에서 activity accumulation 분석:
+    - Early layers: 낮은 activity 예상
+    - Late layers: 높은 activity 예상
+    """
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_layerwise_activity(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """
+        각 레이어(스텝)별 activity 분석
+
+        Returns:
+            layerwise_activity: 각 스텝별 평균 activity 및 accumulation 패턴
+        """
+        step_activities = []  # shape: (num_batches, num_steps, hidden_size)
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Analyzing layerwise activity", total=num_batches)):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                # 모든 step의 출력 얻기
+                all_outputs = self.model(
+                    input_ids,
+                    attention_mask,
+                    return_all_steps=True
+                )
+
+                # 각 스텝의 평균 activity 계산
+                batch_step_acts = []
+                for step_output in all_outputs:
+                    # [batch, seq, hidden] -> mean activity
+                    activity = step_output.abs().mean().item()
+                    batch_step_acts.append(activity)
+
+                step_activities.append(batch_step_acts)
+
+        # Convert to numpy for analysis
+        step_activities = np.array(step_activities)  # (num_batches, num_steps)
+
+        # 각 스텝별 통계
+        results = {
+            'mean_activity_per_step': step_activities.mean(axis=0).tolist(),
+            'std_activity_per_step': step_activities.std(axis=0).tolist(),
+            'accumulation_pattern': {
+                'early_activity': float(step_activities[:, 0].mean()),
+                'late_activity': float(step_activities[:, -1].mean()),
+                'activity_increase': float(step_activities[:, -1].mean() - step_activities[:, 0].mean()),
+                'supports_accumulation_hypothesis': float(step_activities[:, -1].mean()) > float(step_activities[:, 0].mean())
+            },
+            'num_steps': len(all_outputs)
+        }
+
+        return results
+
+
+class CrossTokenInterferenceAnalyzer:
+    """
+    Cross-Token Interference Analysis
+
+    토큰 간 상호작용 및 간섭 분석:
+    - Easy-hard interaction
+    - Hard가 easy를 방해하는가?
+    """
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_cross_token_interference(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """
+        토큰 간 간섭 분석
+
+        Returns:
+            interference_analysis: Easy-hard token 간 간섭 패턴
+        """
+        easy_performances = []  # performance when surrounded by easy tokens
+        hard_performances = []  # performance when surrounded by hard tokens
+        mixed_performances = []  # performance in mixed context
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Analyzing cross-token interference", total=num_batches)):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                # Forward pass to get predictions
+                all_outputs = self.model(
+                    input_ids,
+                    attention_mask,
+                    return_all_steps=True
+                )
+
+                final_output = all_outputs[-1]
+                logits = self.model.mlm_head(final_output)
+                probs = F.softmax(logits, dim=-1)
+
+                # Masked token만 고려 (먼저 마스크 생성)
+                mask = (labels != -100)
+
+                # labels에서 -100을 0으로 대체하여 gather 에러 방지
+                safe_labels = labels.clone()
+                safe_labels[~mask] = 0
+
+                correct_probs = probs.gather(2, safe_labels.unsqueeze(-1)).squeeze(-1)
+
+                # Move to CPU for analysis
+                mask_cpu = mask.cpu()
+                correct_probs_cpu = correct_probs.cpu()
+
+                # 각 토큰의 난이도 분류 및 context 분석
+                for i in range(input_ids.size(0)):
+                    token_difficulties = []
+                    token_probs = []
+
+                    for j in range(input_ids.size(1)):
+                        if not mask_cpu[i, j]:
+                            continue
+
+                        prob = correct_probs_cpu[i, j].item()
+                        token_probs.append(prob)
+
+                        # 난이도 분류
+                        if prob > 0.7:
+                            token_difficulties.append('easy')
+                        elif prob > 0.3:
+                            token_difficulties.append('medium')
+                        else:
+                            token_difficulties.append('hard')
+
+                    # Context 분석
+                    if len(token_difficulties) > 2:
+                        for idx in range(1, len(token_difficulties) - 1):
+                            current_prob = token_probs[idx]
+                            left_diff = token_difficulties[idx - 1]
+                            right_diff = token_difficulties[idx + 1]
+
+                            # Easy context (양옆이 모두 easy)
+                            if left_diff == 'easy' and right_diff == 'easy':
+                                easy_performances.append(current_prob)
+                            # Hard context (양옆이 모두 hard)
+                            elif left_diff == 'hard' and right_diff == 'hard':
+                                hard_performances.append(current_prob)
+                            # Mixed context
+                            else:
+                                mixed_performances.append(current_prob)
+
+        # 결과 분석
+        results = {
+            'easy_context': {
+                'mean_performance': float(np.mean(easy_performances)) if easy_performances else 0.0,
+                'std_performance': float(np.std(easy_performances)) if easy_performances else 0.0,
+                'count': len(easy_performances)
+            },
+            'hard_context': {
+                'mean_performance': float(np.mean(hard_performances)) if hard_performances else 0.0,
+                'std_performance': float(np.std(hard_performances)) if hard_performances else 0.0,
+                'count': len(hard_performances)
+            },
+            'mixed_context': {
+                'mean_performance': float(np.mean(mixed_performances)) if mixed_performances else 0.0,
+                'std_performance': float(np.std(mixed_performances)) if mixed_performances else 0.0,
+                'count': len(mixed_performances)
+            },
+            'interference_effect': {
+                'easy_vs_hard_context_diff': float(np.mean(easy_performances) - np.mean(hard_performances)) if (easy_performances and hard_performances) else 0.0,
+                'hard_tokens_interfere': (float(np.mean(easy_performances)) > float(np.mean(hard_performances))) if (easy_performances and hard_performances) else False
+            }
+        }
+
+        return results
+
+
+class GateEntropyAnalyzer:
+    """
+    Gate Entropy Analysis (Confidence Measure)
+
+    Gate entropy를 사용한 confidence 측정:
+    - confidence = -sum(gate * log(gate))
+    - Easy tokens: low entropy (high confidence)
+    - Hard tokens: high entropy (low confidence)
+    """
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_gate_entropy(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """
+        Gate entropy 분석
+
+        Returns:
+            entropy_analysis: Easy vs Hard tokens의 gate entropy 비교
+        """
+        easy_entropies = []
+        medium_entropies = []
+        hard_entropies = []
+
+        # Gate values 수집을 위한 hook
+        gate_values = []
+
+        def gate_hook(module, input, output):
+            # Gate output을 저장
+            gate_values.append(output.detach())
+
+        # Register hook on gate module
+        # PNN 모델 구조에 맞게 gate에 hook 등록
+        hook_handle = None
+        if hasattr(self.model.delta_refiner, 'gate'):
+            hook_handle = self.model.delta_refiner.gate.register_forward_hook(gate_hook)
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Analyzing gate entropy", total=num_batches)):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                # Clear previous gate values
+                gate_values.clear()
+
+                # Forward pass
+                all_outputs = self.model(
+                    input_ids,
+                    attention_mask,
+                    return_all_steps=True
+                )
+
+                final_output = all_outputs[-1]
+                logits = self.model.mlm_head(final_output)
+                probs = F.softmax(logits, dim=-1)
+
+                # Masked token만 고려
+                mask = (labels != -100)
+                safe_labels = labels.clone()
+                safe_labels[~mask] = 0
+
+                correct_probs = probs.gather(2, safe_labels.unsqueeze(-1)).squeeze(-1)
+
+                # Move to CPU
+                mask_cpu = mask.cpu()
+                correct_probs_cpu = correct_probs.cpu()
+
+                # Gate entropy 계산
+                if gate_values:
+                    # 마지막 스텝의 gate 값 사용
+                    last_gate = gate_values[-1] if len(gate_values) > 0 else None
+
+                    if last_gate is not None:
+                        # Entropy 계산: -sum(p * log(p))
+                        # Gate values are in [0, 1], add epsilon for numerical stability
+                        epsilon = 1e-10
+                        gate_cpu = last_gate.cpu()
+                        gate_clipped = torch.clamp(gate_cpu, epsilon, 1.0 - epsilon)
+
+                        # Binary entropy for each dimension
+                        entropy = -(gate_clipped * torch.log(gate_clipped) +
+                                   (1 - gate_clipped) * torch.log(1 - gate_clipped))
+
+                        # Average entropy per token
+                        token_entropy = entropy.mean(dim=-1)  # [batch, seq]
+
+                        # 난이도별 entropy 분류
+                        for i in range(input_ids.size(0)):
+                            for j in range(input_ids.size(1)):
+                                if not mask_cpu[i, j]:
+                                    continue
+
+                                prob = correct_probs_cpu[i, j].item()
+                                ent = token_entropy[i, j].item()
+
+                                if prob > 0.7:
+                                    easy_entropies.append(ent)
+                                elif prob > 0.3:
+                                    medium_entropies.append(ent)
+                                else:
+                                    hard_entropies.append(ent)
+
+        # Remove hook
+        if hook_handle is not None:
+            hook_handle.remove()
+
+        # 결과 분석
+        results = {
+            'easy_tokens': {
+                'mean_entropy': float(np.mean(easy_entropies)) if easy_entropies else 0.0,
+                'std_entropy': float(np.std(easy_entropies)) if easy_entropies else 0.0,
+                'count': len(easy_entropies)
+            },
+            'medium_tokens': {
+                'mean_entropy': float(np.mean(medium_entropies)) if medium_entropies else 0.0,
+                'std_entropy': float(np.std(medium_entropies)) if medium_entropies else 0.0,
+                'count': len(medium_entropies)
+            },
+            'hard_tokens': {
+                'mean_entropy': float(np.mean(hard_entropies)) if hard_entropies else 0.0,
+                'std_entropy': float(np.std(hard_entropies)) if hard_entropies else 0.0,
+                'count': len(hard_entropies)
+            },
+            'confidence_hypothesis': {
+                'easy_lower_entropy': (float(np.mean(easy_entropies)) < float(np.mean(hard_entropies))) if (easy_entropies and hard_entropies) else False,
+                'entropy_difference': float(np.mean(hard_entropies) - np.mean(easy_entropies)) if (easy_entropies and hard_entropies) else 0.0
+            }
+        }
+
+        return results
+
+
 def prepare_test_data(tokenizer, num_samples: int = 100):
     """테스트 데이터 준비"""
     from pnn.data.dataset import MLMDataset
@@ -1486,7 +1824,7 @@ def main():
         '--experiment',
         type=str,
         default='all',
-        choices=['all', 'meg', 'optogenetics', 'modeling', 'dimensionwise', 'difficulty', 'layer_importance', 'gate_specificity'],
+        choices=['all', 'meg', 'optogenetics', 'modeling', 'dimensionwise', 'difficulty', 'layer_importance', 'gate_specificity', 'layerwise_activity', 'cross_token', 'gate_entropy'],
         help='Which experiment to run'
     )
     parser.add_argument(
@@ -1775,6 +2113,69 @@ def main():
                 print(f"    scale={scale:.2f}: acc={data['metrics']['accuracy']*100:.2f}%, drop={drop:.2f}%")
             print(f"    → Tests robustness to gate strength (pattern preserved)")
 
+    # Experiment 8: Layer-wise Activity Analysis
+    if args.experiment in ['all', 'layerwise_activity']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 8: Layer-wise Activity Analysis")
+        print(f"{'='*80}\n")
+
+        layerwise_analyzer = LayerwiseActivityAnalyzer(model, args.device)
+        layerwise_results = layerwise_analyzer.analyze_layerwise_activity(test_loader, args.num_batches)
+        results['layerwise_activity_analysis'] = layerwise_results
+
+        print("\n📊 Layer-wise Activity Analysis Results:")
+        print(f"  Early layer activity: {layerwise_results['accumulation_pattern']['early_activity']:.4f}")
+        print(f"  Late layer activity: {layerwise_results['accumulation_pattern']['late_activity']:.4f}")
+        print(f"  Activity increase: {layerwise_results['accumulation_pattern']['activity_increase']:.4f}")
+        print(f"  Supports accumulation hypothesis: {layerwise_results['accumulation_pattern']['supports_accumulation_hypothesis']}")
+
+        if 'mean_activity_per_step' in layerwise_results:
+            print("\n  Activity per step:")
+            for step, activity in enumerate(layerwise_results['mean_activity_per_step']):
+                print(f"    Step {step}: {activity:.4f}")
+
+    # Experiment 9: Cross-Token Interference Analysis
+    if args.experiment in ['all', 'cross_token']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 9: Cross-Token Interference Analysis")
+        print(f"{'='*80}\n")
+
+        interference_analyzer = CrossTokenInterferenceAnalyzer(model, args.device)
+        interference_results = interference_analyzer.analyze_cross_token_interference(test_loader, args.num_batches)
+        results['cross_token_interference'] = interference_results
+
+        print("\n📊 Cross-Token Interference Results:")
+        print(f"  Easy context: mean={interference_results['easy_context']['mean_performance']:.4f}, "
+              f"count={interference_results['easy_context']['count']}")
+        print(f"  Hard context: mean={interference_results['hard_context']['mean_performance']:.4f}, "
+              f"count={interference_results['hard_context']['count']}")
+        print(f"  Mixed context: mean={interference_results['mixed_context']['mean_performance']:.4f}, "
+              f"count={interference_results['mixed_context']['count']}")
+        print(f"\n  Interference effect:")
+        print(f"    Easy vs Hard context difference: {interference_results['interference_effect']['easy_vs_hard_context_diff']:.4f}")
+        print(f"    Hard tokens interfere: {interference_results['interference_effect']['hard_tokens_interfere']}")
+
+    # Experiment 10: Gate Entropy Analysis
+    if args.experiment in ['all', 'gate_entropy']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 10: Gate Entropy Analysis (Confidence Measure)")
+        print(f"{'='*80}\n")
+
+        entropy_analyzer = GateEntropyAnalyzer(model, args.device)
+        entropy_results = entropy_analyzer.analyze_gate_entropy(test_loader, args.num_batches)
+        results['gate_entropy_analysis'] = entropy_results
+
+        print("\n📊 Gate Entropy Analysis Results:")
+        print(f"  Easy tokens: mean_entropy={entropy_results['easy_tokens']['mean_entropy']:.4f}, "
+              f"count={entropy_results['easy_tokens']['count']}")
+        print(f"  Medium tokens: mean_entropy={entropy_results['medium_tokens']['mean_entropy']:.4f}, "
+              f"count={entropy_results['medium_tokens']['count']}")
+        print(f"  Hard tokens: mean_entropy={entropy_results['hard_tokens']['mean_entropy']:.4f}, "
+              f"count={entropy_results['hard_tokens']['count']}")
+        print(f"\n  Confidence hypothesis:")
+        print(f"    Easy has lower entropy: {entropy_results['confidence_hypothesis']['easy_lower_entropy']}")
+        print(f"    Entropy difference (hard - easy): {entropy_results['confidence_hypothesis']['entropy_difference']:.4f}")
+
     # Save results
     results_file = output_dir / 'experimental_results.json'
     with open(results_file, 'w') as f:
@@ -1807,6 +2208,12 @@ def main():
         print(f"   - layer_importance_analysis.png")
     if 'gate_specificity' in results:
         print(f"   - gate_specificity_tests.png")
+    if 'layerwise_activity_analysis' in results:
+        print(f"   - layerwise_activity_analysis.png")
+    if 'cross_token_interference' in results:
+        print(f"   - cross_token_interference.png")
+    if 'gate_entropy_analysis' in results:
+        print(f"   - gate_entropy_analysis.png")
 
 
 if __name__ == "__main__":
