@@ -14,6 +14,14 @@ Usage:
     python scripts/experimental_evidence.py --checkpoint checkpoints/best_model.pt --experiment modeling
 """
 
+# Add parent directory to path for imports (makes it work without installation)
+import sys
+from pathlib import Path
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
