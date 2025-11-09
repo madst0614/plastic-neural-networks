@@ -1809,6 +1809,208 @@ def save_visualizations(results: Dict, output_dir: Path):
         plt.close()
         print(f"✅ Saved: {output_dir / 'gate_specificity_tests.png'}")
 
+    # Layerwise activity 결과 시각화
+    if 'layerwise_activity_analysis' in results:
+        layerwise = results['layerwise_activity_analysis']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Layer-wise Activity Analysis: Accumulation Patterns', fontsize=16)
+
+        # Mean activity per step
+        if 'mean_activity_per_step' in layerwise:
+            mean_acts = layerwise['mean_activity_per_step']
+            std_acts = layerwise.get('std_activity_per_step', [0] * len(mean_acts))
+            steps = list(range(len(mean_acts)))
+
+            axes[0].plot(steps, mean_acts, marker='o', linewidth=2, color='#4ecdc4')
+            axes[0].fill_between(steps,
+                                 np.array(mean_acts) - np.array(std_acts),
+                                 np.array(mean_acts) + np.array(std_acts),
+                                 alpha=0.3, color='#4ecdc4')
+            axes[0].set_xlabel('Processing Step')
+            axes[0].set_ylabel('Mean Activity')
+            axes[0].set_title('Activity Across Processing Steps')
+            axes[0].grid(True, alpha=0.3)
+
+        # Accumulation pattern
+        if 'accumulation_pattern' in layerwise:
+            pattern = layerwise['accumulation_pattern']
+            categories = ['Early\nLayer', 'Late\nLayer']
+            values = [pattern['early_activity'], pattern['late_activity']]
+            colors = ['#66b3ff', '#ff9999']
+
+            axes[1].bar(categories, values, color=colors, width=0.5)
+            axes[1].set_ylabel('Activity Level')
+            axes[1].set_title('Early vs Late Layer Activity')
+            axes[1].grid(True, alpha=0.3, axis='y')
+
+            # Add values on bars
+            for i, (cat, val) in enumerate(zip(categories, values)):
+                axes[1].text(i, val + 0.01, f'{val:.4f}',
+                           ha='center', va='bottom', fontweight='bold')
+
+            # Add hypothesis test result
+            supports = pattern.get('supports_accumulation_hypothesis', False)
+            increase = pattern.get('activity_increase', 0)
+            result_text = f"Accumulation: {'✓' if supports else '✗'}\nIncrease: {increase:.4f}"
+            axes[1].text(0.5, 0.95, result_text,
+                        transform=axes[1].transAxes,
+                        ha='center', va='top',
+                        bbox=dict(boxstyle='round', facecolor='lightgreen' if supports else 'lightcoral', alpha=0.5))
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'layerwise_activity_analysis.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'layerwise_activity_analysis.png'}")
+
+    # Cross-token interference 결과 시각화
+    if 'cross_token_interference' in results:
+        interference = results['cross_token_interference']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Cross-Token Interference Analysis', fontsize=16)
+
+        # Performance by context
+        contexts = ['Easy\nContext', 'Hard\nContext', 'Mixed\nContext']
+        perfs = [
+            interference['easy_context']['mean_performance'],
+            interference['hard_context']['mean_performance'],
+            interference['mixed_context']['mean_performance']
+        ]
+        stds = [
+            interference['easy_context']['std_performance'],
+            interference['hard_context']['std_performance'],
+            interference['mixed_context']['std_performance']
+        ]
+        colors = ['#66b3ff', '#ff9999', '#ffcc99']
+
+        axes[0].bar(contexts, perfs, color=colors, yerr=stds, capsize=5, width=0.6)
+        axes[0].set_ylabel('Mean Performance (Probability)')
+        axes[0].set_title('Performance by Token Context')
+        axes[0].grid(True, alpha=0.3, axis='y')
+
+        # Add values on bars
+        for i, (ctx, perf) in enumerate(zip(contexts, perfs)):
+            axes[0].text(i, perf + 0.02, f'{perf:.3f}',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Interference effect
+        if 'interference_effect' in interference:
+            effect = interference['interference_effect']
+            diff = effect['easy_vs_hard_context_diff']
+            interferes = effect['hard_tokens_interfere']
+
+            categories = ['Easy - Hard\nDifference']
+            values = [diff]
+            color = '#ff6b6b' if interferes else '#66b3ff'
+
+            axes[1].bar(categories, values, color=color, width=0.4)
+            axes[1].set_ylabel('Performance Difference')
+            axes[1].set_title('Interference Effect')
+            axes[1].axhline(y=0, color='black', linestyle='--', alpha=0.5)
+            axes[1].grid(True, alpha=0.3, axis='y')
+
+            # Add value on bar
+            axes[1].text(0, diff + (0.01 if diff > 0 else -0.01),
+                        f'{diff:.4f}',
+                        ha='center',
+                        va='bottom' if diff > 0 else 'top',
+                        fontweight='bold')
+
+            # Add interpretation
+            result_text = f"Hard tokens interfere: {'✓' if interferes else '✗'}\n"
+            if interferes:
+                result_text += "Hard tokens decrease\nneighboring performance"
+            else:
+                result_text += "No significant\ninterference detected"
+
+            axes[1].text(0.5, 0.95, result_text,
+                        transform=axes[1].transAxes,
+                        ha='center', va='top',
+                        bbox=dict(boxstyle='round',
+                                facecolor='lightcoral' if interferes else 'lightgreen',
+                                alpha=0.5))
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'cross_token_interference.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'cross_token_interference.png'}")
+
+    # Gate entropy 결과 시각화
+    if 'gate_entropy_analysis' in results:
+        entropy = results['gate_entropy_analysis']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Gate Entropy Analysis: Confidence Measure', fontsize=16)
+
+        # Entropy by token difficulty
+        difficulties = ['Easy', 'Medium', 'Hard']
+        entropies = [
+            entropy['easy_tokens']['mean_entropy'],
+            entropy['medium_tokens']['mean_entropy'],
+            entropy['hard_tokens']['mean_entropy']
+        ]
+        stds = [
+            entropy['easy_tokens']['std_entropy'],
+            entropy['medium_tokens']['std_entropy'],
+            entropy['hard_tokens']['std_entropy']
+        ]
+        colors = ['#66b3ff', '#ffcc99', '#ff9999']
+
+        axes[0].bar(difficulties, entropies, color=colors, yerr=stds, capsize=5, width=0.6)
+        axes[0].set_ylabel('Mean Gate Entropy')
+        axes[0].set_xlabel('Token Difficulty')
+        axes[0].set_title('Gate Entropy by Token Difficulty')
+        axes[0].grid(True, alpha=0.3, axis='y')
+
+        # Add values on bars
+        for i, (diff, ent) in enumerate(zip(difficulties, entropies)):
+            axes[0].text(i, ent + 0.01, f'{ent:.4f}',
+                        ha='center', va='bottom', fontweight='bold')
+
+        # Confidence hypothesis test
+        if 'confidence_hypothesis' in entropy:
+            hyp = entropy['confidence_hypothesis']
+            easy_lower = hyp['easy_lower_entropy']
+            ent_diff = hyp['entropy_difference']
+
+            categories = ['Hard - Easy\nEntropy Diff']
+            values = [ent_diff]
+            color = '#66b3ff' if easy_lower else '#ff9999'
+
+            axes[1].bar(categories, values, color=color, width=0.4)
+            axes[1].set_ylabel('Entropy Difference')
+            axes[1].set_title('Confidence Hypothesis Test')
+            axes[1].axhline(y=0, color='black', linestyle='--', alpha=0.5)
+            axes[1].grid(True, alpha=0.3, axis='y')
+
+            # Add value on bar
+            axes[1].text(0, ent_diff + (0.005 if ent_diff > 0 else -0.005),
+                        f'{ent_diff:.4f}',
+                        ha='center',
+                        va='bottom' if ent_diff > 0 else 'top',
+                        fontweight='bold')
+
+            # Add interpretation
+            result_text = f"Easy has lower entropy: {'✓' if easy_lower else '✗'}\n"
+            if easy_lower:
+                result_text += "Easy → High confidence\nHard → Low confidence"
+            else:
+                result_text += "Hypothesis not\nsupported"
+
+            axes[1].text(0.5, 0.95, result_text,
+                        transform=axes[1].transAxes,
+                        ha='center', va='top',
+                        bbox=dict(boxstyle='round',
+                                facecolor='lightgreen' if easy_lower else 'lightcoral',
+                                alpha=0.5))
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'gate_entropy_analysis.png', dpi=300)
+        plt.close()
+        print(f"✅ Saved: {output_dir / 'gate_entropy_analysis.png'}")
+
+
 
 def main():
     parser = argparse.ArgumentParser(
