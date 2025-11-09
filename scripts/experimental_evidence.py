@@ -819,10 +819,16 @@ class TokenDifficultyAnalyzer:
 
                 # 각 토큰의 정답 확률
                 probs = F.softmax(logits, dim=-1)
-                correct_probs = probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
 
-                # Masked token만 고려
+                # Masked token만 고려 (먼저 마스크 생성)
                 mask = (labels != -100)
+
+                # labels에서 -100을 0으로 대체하여 gather 에러 방지
+                # (나중에 mask로 필터링할 것이므로 0으로 대체해도 무방)
+                safe_labels = labels.clone()
+                safe_labels[~mask] = 0
+
+                correct_probs = probs.gather(2, safe_labels.unsqueeze(-1)).squeeze(-1)
 
                 # Move tensors to CPU for safe indexing
                 mask_cpu = mask.cpu()
