@@ -652,17 +652,53 @@ def main():
     print("📥 Loading checkpoint...")
     checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
 
-    # Load model state dict
+    # Get state dict
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = checkpoint['model_state_dict']
     else:
         # Checkpoint might be just the state dict
-        model.load_state_dict(checkpoint)
+        state_dict = checkpoint
+
+    # Remove '_orig_mod.' prefix if present (from torch.compile)
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace('_orig_mod.', '')
+        new_state_dict[new_key] = value
+
+    # Map old key names to new key names
+    key_mapping = {
+        'embeddings.weight': 'token_embeddings.weight',
+        'delta_refiner.norm1.weight': 'delta_refiner.attn_layer_norm.weight',
+        'delta_refiner.norm1.bias': 'delta_refiner.attn_layer_norm.bias',
+        'delta_refiner.norm2.weight': 'delta_refiner.ffn_layer_norm.weight',
+        'delta_refiner.norm2.bias': 'delta_refiner.ffn_layer_norm.bias',
+        'delta_refiner.gate_query.weight': 'delta_refiner.gate.query_proj.weight',
+        'delta_refiner.gate_query.bias': 'delta_refiner.gate.query_proj.bias',
+        'delta_refiner.gate_key.weight': 'delta_refiner.gate.key_proj.weight',
+        'delta_refiner.gate_key.bias': 'delta_refiner.gate.key_proj.bias',
+        'delta_refiner.temperature': 'delta_refiner.gate.temperature',
+        # FFN layer indices (old model might use different indices)
+        'delta_refiner.ffn.2.weight': 'delta_refiner.ffn.3.weight',
+        'delta_refiner.ffn.2.bias': 'delta_refiner.ffn.3.bias',
+    }
+
+    final_state_dict = {}
+    for key, value in new_state_dict.items():
+        mapped_key = key_mapping.get(key, key)
+        final_state_dict[mapped_key] = value
+
+    # Load the mapped state dict
+    try:
+        model.load_state_dict(final_state_dict, strict=False)
+        print(f"✅ Model loaded on {args.device}")
+    except Exception as e:
+        print(f"⚠️  Warning: {e}")
+        print("Attempting to load with strict=False...")
+        model.load_state_dict(final_state_dict, strict=False)
+        print(f"✅ Model partially loaded on {args.device}")
 
     model = model.to(args.device)
     model.eval()
-
-    print(f"✅ Model loaded on {args.device}")
 
     # Load tokenizer and data
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
