@@ -841,11 +841,13 @@ class DeltaRefinerExtendedDepth(nn.Module):
         Returns:
             delta: Gated additive update [batch, seq_len, hidden]
         """
-        h_original = h  # Keep original for delta computation
+        h_original = h  # Keep original for gating
         h_current = h
 
-        # Process through all transformer blocks
-        for i, block in enumerate(self.blocks):
+        # Process through all blocks EXCEPT the last one
+        # These blocks transform h with residual connections
+        for i in range(len(self.blocks) - 1):
+            block = self.blocks[i]
             # Attention block
             attn_out, _ = block['attention'](
                 h_current, h_current, h_current,
@@ -855,13 +857,24 @@ class DeltaRefinerExtendedDepth(nn.Module):
                 h_current + block['attn_dropout'](attn_out)
             )
 
-            # FFN block
+            # FFN block with residual
             ffn_out = block['ffn'](h_attn)
             h_current = block['ffn_layer_norm'](h_attn + ffn_out)
 
-        # Compute actual delta (difference from original)
-        # This is critical: delta should be the CHANGE, not the transformed value!
-        delta_raw = h_current - h_original
+        # Last block: generate delta directly (like baseline DeltaRefiner)
+        # NO residual connection on final FFN output
+        last_block = self.blocks[-1]
+        attn_out, _ = last_block['attention'](
+            h_current, h_current, h_current,
+            key_padding_mask=attention_mask
+        )
+        h_attn = last_block['attn_layer_norm'](
+            h_current + last_block['attn_dropout'](attn_out)
+        )
+
+        # FFN output becomes delta_raw directly (no residual)
+        delta_raw = last_block['ffn'](h_attn)
+        delta_raw = last_block['ffn_layer_norm'](delta_raw)
 
         # Apply adaptive gating (compare original with delta)
         gate = self.gate(h_original, delta_raw)
