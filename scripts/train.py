@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument('--hidden_size', type=int, default=768)
     parser.add_argument('--num_heads', type=int, default=12)
     parser.add_argument('--intermediate_size', type=int, default=2048)
-    parser.add_argument('--num_steps', type=int, default=4, help='PNN refinement steps')
+    parser.add_argument('--num_steps', type=int, default=4, help='PNN refinement steps (Exp2 with dual refiners needs 8 for fair comparison)')
     parser.add_argument('--max_length', type=int, default=128)
     parser.add_argument('--dropout', type=float, default=0.1)
     
