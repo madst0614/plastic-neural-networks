@@ -775,14 +775,17 @@ class PlasticNeuralNetworkExp2(nn.Module):
 
 class DeltaRefinerExtendedDepth(nn.Module):
     """
-    Experiment 4: Delta Refiner with Extended Depth (3 Transformer Blocks)
+    Experiment 4/5: Delta Refiner with Extended Depth (Multiple FFN Layers)
 
-    Structure: (Attention1 → FFN1) → (Attention2 → FFN2) → (Attention3 → FFN3) → Gate
-    Tests if deeper structure (3 blocks) outperforms dual blocks (Exp1).
-    Each FFN: 768 → 2048 → 768 (proven size from Exp1)
+    Structure: Attention → FFN1 → FFN2 → ... → FFN(n-1) → FFN(n) → Gate
+    - Single attention for contextual representation
+    - Multiple FFN layers for deeper delta transformation
 
-    Total params per refiner: ~16.7M
-    Applied recurrently for 4 steps = 12 transformer passes total
+    Key insight: Attention gathers context once, FFNs do the heavy transformation work.
+    This is more parameter-efficient and has cleaner gradient flow than stacking Attn+FFN blocks.
+
+    For num_blocks=3: Attention → FFN1 → FFN2 → FFN3 → Gate
+    For num_blocks=8: Attention → FFN1 → ... → FFN7 → FFN8 → Gate
     """
 
     def __init__(
@@ -797,18 +800,20 @@ class DeltaRefinerExtendedDepth(nn.Module):
         self.hidden_size = hidden_size
         self.num_blocks = num_blocks
 
-        # Create transformer blocks dynamically
-        self.blocks = nn.ModuleList()
+        # Single attention for contextual representation
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.attn_layer_norm = nn.LayerNorm(hidden_size)
+        self.attn_dropout = nn.Dropout(dropout)
+
+        # Multiple FFN blocks for deeper transformation
+        self.ffn_blocks = nn.ModuleList()
         for i in range(num_blocks):
-            block = nn.ModuleDict({
-                'attention': nn.MultiheadAttention(
-                    embed_dim=hidden_size,
-                    num_heads=num_heads,
-                    dropout=dropout,
-                    batch_first=True
-                ),
-                'attn_layer_norm': nn.LayerNorm(hidden_size),
-                'attn_dropout': nn.Dropout(dropout),
+            ffn_block = nn.ModuleDict({
                 'ffn': nn.Sequential(
                     nn.Linear(hidden_size, intermediate_size),
                     nn.GELU(),
@@ -819,15 +824,15 @@ class DeltaRefinerExtendedDepth(nn.Module):
                 'ffn_layer_norm': nn.LayerNorm(hidden_size)
             })
             # Initialize final FFN layer:
-            # - First (num_blocks-1) blocks: zero-init for stability (with residual)
-            # - Last block: normal-init for faster learning (generates delta)
+            # - First (num_blocks-1) FFNs: zero-init for stability (with residual)
+            # - Last FFN: normal-init for faster learning (generates delta)
             if i < num_blocks - 1:
-                nn.init.zeros_(block['ffn'][3].weight)
-                nn.init.zeros_(block['ffn'][3].bias)
+                nn.init.zeros_(ffn_block['ffn'][3].weight)
+                nn.init.zeros_(ffn_block['ffn'][3].bias)
             else:
-                nn.init.normal_(block['ffn'][3].weight, mean=0.0, std=0.02)
-                nn.init.zeros_(block['ffn'][3].bias)
-            self.blocks.append(block)
+                nn.init.normal_(ffn_block['ffn'][3].weight, mean=0.0, std=0.02)
+                nn.init.zeros_(ffn_block['ffn'][3].bias)
+            self.ffn_blocks.append(ffn_block)
 
         # Adaptive gating
         self.gate = QueryKeyGate(hidden_size)
@@ -848,41 +853,24 @@ class DeltaRefinerExtendedDepth(nn.Module):
             delta: Gated additive update [batch, seq_len, hidden]
         """
         h_original = h  # Keep original for gating
-        h_current = h
 
-        # Process through all blocks EXCEPT the last one
-        # These blocks transform h with residual connections
-        for i in range(len(self.blocks) - 1):
-            block = self.blocks[i]
-            # Attention block
-            attn_out, _ = block['attention'](
-                h_current, h_current, h_current,
-                key_padding_mask=attention_mask
-            )
-            h_attn = block['attn_layer_norm'](
-                h_current + block['attn_dropout'](attn_out)
-            )
+        # Step 1: Attention to gather contextual information (only once)
+        attn_out, _ = self.attention(h, h, h, key_padding_mask=attention_mask)
+        h_current = self.attn_layer_norm(h + self.attn_dropout(attn_out))
 
-            # FFN block with residual
-            ffn_out = block['ffn'](h_attn)
-            h_current = block['ffn_layer_norm'](h_attn + ffn_out)
+        # Step 2: Process through FFN blocks (except last) with residual
+        # These layers do deeper transformation of the contextual representation
+        for i in range(len(self.ffn_blocks) - 1):
+            ffn_block = self.ffn_blocks[i]
+            ffn_out = ffn_block['ffn'](h_current)
+            h_current = ffn_block['ffn_layer_norm'](h_current + ffn_out)
 
-        # Last block: generate delta directly (like baseline DeltaRefiner)
-        # NO residual connection on final FFN output
-        last_block = self.blocks[-1]
-        attn_out, _ = last_block['attention'](
-            h_current, h_current, h_current,
-            key_padding_mask=attention_mask
-        )
-        h_attn = last_block['attn_layer_norm'](
-            h_current + last_block['attn_dropout'](attn_out)
-        )
+        # Step 3: Last FFN generates delta directly (no residual)
+        last_ffn_block = self.ffn_blocks[-1]
+        delta_raw = last_ffn_block['ffn'](h_current)
+        delta_raw = last_ffn_block['ffn_layer_norm'](delta_raw)
 
-        # FFN output becomes delta_raw directly (no residual)
-        delta_raw = last_block['ffn'](h_attn)
-        delta_raw = last_block['ffn_layer_norm'](delta_raw)
-
-        # Apply adaptive gating (compare original with delta)
+        # Step 4: Apply adaptive gating (compare original with delta)
         gate = self.gate(h_original, delta_raw)
         delta = gate * delta_raw
 
