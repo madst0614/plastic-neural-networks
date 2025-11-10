@@ -260,12 +260,12 @@ def train_epoch(
             optimizer.zero_grad()
             scheduler.step()
 
-        # Update progress bar with latest step info
-        last_step_loss = batch_step_losses[-1]
-        last_step_acc = batch_step_accs[-1]
+        # Update progress bar with all step info
+        losses_str = ','.join([f'{l:.2f}' for l in batch_step_losses])
+        accs_str = ','.join([f'{a:.2f}' for a in batch_step_accs])
         progress.set_postfix({
-            'loss': f'{last_step_loss:.4f}',
-            'acc': f'{last_step_acc:.4f}',
+            'L': f'[{losses_str}]',
+            'A': f'[{accs_str}]',
             'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
         })
 
