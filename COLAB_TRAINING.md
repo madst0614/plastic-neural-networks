@@ -2,7 +2,9 @@
 
 ## Setup (Run in first cell)
 
-```bash
+### Option 1: Safe Method (Recommended for Colab)
+
+```python
 # Clone repository
 !git clone https://github.com/madst0614/plastic-neural-networks.git
 %cd plastic-neural-networks
@@ -10,8 +12,31 @@
 # Checkout experiment branch
 !git checkout claude/refiner-experiments-ffn-011CUz2zZ6v1XqK5Fzwdy8eN
 
-# Install package and dependencies
+# Add to Python path (avoids package conflicts)
+import sys
+sys.path.insert(0, '/content/plastic-neural-networks')
+
+# Install only missing packages
+!pip install -q datasets accelerate
+
+# Test import
+from pnn.models.pnn import create_pnn_model
+print("✅ Setup complete!")
+```
+
+### Option 2: Full Install (Requires runtime restart)
+
+```bash
+!git clone https://github.com/madst0614/plastic-neural-networks.git
+%cd plastic-neural-networks
+!git checkout claude/refiner-experiments-ffn-011CUz2zZ6v1XqK5Fzwdy8eN
+
+# Install package
 !pip install -e .
+
+# ⚠️ IMPORTANT: Restart runtime after this
+# Runtime → Restart runtime (from menu)
+# Then run training commands in new cells
 ```
 
 ---
