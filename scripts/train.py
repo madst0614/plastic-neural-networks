@@ -262,16 +262,16 @@ def train_epoch(
 
         # Update progress bar with all step info
         if args.model == 'pnn_exp2':
-            # Exp2: Group by cycle (C1: R1→R2 steps 0,1 / C2: R1→R2 steps 2,3)
-            c1_losses = ','.join([f'{batch_step_losses[i]:.4f}' for i in [0, 1]])
-            c1_accs = ','.join([f'{batch_step_accs[i]:.4f}' for i in [0, 1]])
-            c2_losses = ','.join([f'{batch_step_losses[i]:.4f}' for i in [2, 3]])
-            c2_accs = ','.join([f'{batch_step_accs[i]:.4f}' for i in [2, 3]])
+            # Exp2: Group by refiner (R1: steps 0,2 / R2: steps 1,3)
+            r1_losses = ','.join([f'{batch_step_losses[i]:.4f}' for i in [0, 2]])
+            r1_accs = ','.join([f'{batch_step_accs[i]:.4f}' for i in [0, 2]])
+            r2_losses = ','.join([f'{batch_step_losses[i]:.4f}' for i in [1, 3]])
+            r2_accs = ','.join([f'{batch_step_accs[i]:.4f}' for i in [1, 3]])
             progress.set_postfix({
-                'C1_L': f'[{c1_losses}]',
-                'C1_A': f'[{c1_accs}]',
-                'C2_L': f'[{c2_losses}]',
-                'C2_A': f'[{c2_accs}]',
+                'R1_L': f'[{r1_losses}]',
+                'R1_A': f'[{r1_accs}]',
+                'R2_L': f'[{r2_losses}]',
+                'R2_A': f'[{r2_accs}]',
                 'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
             })
         else:
