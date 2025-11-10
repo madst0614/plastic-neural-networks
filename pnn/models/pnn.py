@@ -598,7 +598,7 @@ class PlasticNeuralNetworkExp2(nn.Module):
         num_heads: int = 12,
         intermediate_size: int = 2048,
         max_length: int = 128,
-        num_iterations: int = 2,  # 2 iterations × 2 refiners = 4 steps
+        num_iterations: int = 4,  # 4 iterations × 2 refiners = 8 steps
         dropout: float = 0.1
     ):
         super().__init__()
@@ -731,7 +731,7 @@ class PlasticNeuralNetworkExp2(nn.Module):
             step_accs: (optional) Individual accuracies per step
         """
         if step_weights is None:
-            step_weights = [0.1, 0.2, 0.3, 0.4]  # 4 steps total
+            step_weights = [0.05, 0.07, 0.09, 0.11, 0.13, 0.15, 0.17, 0.23]  # 8 steps total
 
         # Get outputs from all steps
         all_outputs = self.forward(
@@ -744,7 +744,7 @@ class PlasticNeuralNetworkExp2(nn.Module):
         step_losses = []
         step_accs = [] if return_accuracies else None
 
-        # Skip embedding (step 0), compute loss for refinement steps (1-4)
+        # Skip embedding (step 0), compute loss for refinement steps (1-8)
         for step_idx, hidden in enumerate(all_outputs[1:], start=0):
             loss, logits = self.get_mlm_loss(hidden, labels)
             weight = step_weights[step_idx]
