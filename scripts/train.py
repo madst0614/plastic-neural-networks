@@ -261,8 +261,8 @@ def train_epoch(
             scheduler.step()
 
         # Update progress bar with all step info
-        losses_str = ','.join([f'{l:.2f}' for l in batch_step_losses])
-        accs_str = ','.join([f'{a:.2f}' for a in batch_step_accs])
+        losses_str = ','.join([f'{l:.4f}' for l in batch_step_losses])
+        accs_str = ','.join([f'{a:.4f}' for a in batch_step_accs])
         progress.set_postfix({
             'L': f'[{losses_str}]',
             'A': f'[{accs_str}]',
