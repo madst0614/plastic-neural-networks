@@ -10,8 +10,8 @@
 # Checkout experiment branch
 !git checkout claude/refiner-experiments-ffn-011CUz2zZ6v1XqK5Fzwdy8eN
 
-# Install dependencies
-!pip install -q torch transformers datasets accelerate tensorboard pyyaml tqdm
+# Install package and dependencies
+!pip install -e .
 ```
 
 ---
