@@ -261,13 +261,28 @@ def train_epoch(
             scheduler.step()
 
         # Update progress bar with all step info
-        losses_str = ','.join([f'{l:.4f}' for l in batch_step_losses])
-        accs_str = ','.join([f'{a:.4f}' for a in batch_step_accs])
-        progress.set_postfix({
-            'L': f'[{losses_str}]',
-            'A': f'[{accs_str}]',
-            'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
-        })
+        if args.model == 'pnn_exp2':
+            # Exp2: Group by refiner (R1: steps 0,2 / R2: steps 1,3)
+            r1_losses = ','.join([f'{batch_step_losses[i]:.4f}' for i in [0, 2]])
+            r1_accs = ','.join([f'{batch_step_accs[i]:.4f}' for i in [0, 2]])
+            r2_losses = ','.join([f'{batch_step_losses[i]:.4f}' for i in [1, 3]])
+            r2_accs = ','.join([f'{batch_step_accs[i]:.4f}' for i in [1, 3]])
+            progress.set_postfix({
+                'R1_L': f'[{r1_losses}]',
+                'R1_A': f'[{r1_accs}]',
+                'R2_L': f'[{r2_losses}]',
+                'R2_A': f'[{r2_accs}]',
+                'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+            })
+        else:
+            # Exp1 or base model: Show all steps
+            losses_str = ','.join([f'{l:.4f}' for l in batch_step_losses])
+            accs_str = ','.join([f'{a:.4f}' for a in batch_step_accs])
+            progress.set_postfix({
+                'L': f'[{losses_str}]',
+                'A': f'[{accs_str}]',
+                'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+            })
 
     # Average losses and accuracies
     avg_loss = total_loss / len(dataloader)
