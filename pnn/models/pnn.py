@@ -772,6 +772,266 @@ class PlasticNeuralNetworkExp2(nn.Module):
             return total_loss, step_losses
 
 
+class DeltaRefinerExtendedDepth(nn.Module):
+    """
+    Experiment 4: Delta Refiner with Extended Depth (3 Transformer Blocks)
+
+    Structure: (Attention1 → FFN1) → (Attention2 → FFN2) → (Attention3 → FFN3) → Gate
+    Tests if deeper structure (3 blocks) outperforms dual blocks (Exp1).
+    Each FFN: 768 → 2048 → 768 (proven size from Exp1)
+
+    Total params per refiner: ~16.7M
+    Applied recurrently for 4 steps = 12 transformer passes total
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        num_heads: int = 12,
+        intermediate_size: int = 2048,
+        dropout: float = 0.1,
+        num_blocks: int = 3
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_blocks = num_blocks
+
+        # Create transformer blocks dynamically
+        self.blocks = nn.ModuleList()
+        for i in range(num_blocks):
+            block = nn.ModuleDict({
+                'attention': nn.MultiheadAttention(
+                    embed_dim=hidden_size,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                    batch_first=True
+                ),
+                'attn_layer_norm': nn.LayerNorm(hidden_size),
+                'attn_dropout': nn.Dropout(dropout),
+                'ffn': nn.Sequential(
+                    nn.Linear(hidden_size, intermediate_size),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(intermediate_size, hidden_size),
+                    nn.Dropout(dropout)
+                ),
+                'ffn_layer_norm': nn.LayerNorm(hidden_size)
+            })
+            # Zero-initialize final FFN layer for stable training
+            nn.init.zeros_(block['ffn'][3].weight)
+            nn.init.zeros_(block['ffn'][3].bias)
+            self.blocks.append(block)
+
+        # Adaptive gating
+        self.gate = QueryKeyGate(hidden_size)
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        attention_mask: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Compute delta through extended depth processing.
+
+        Args:
+            h: Current representation [batch, seq_len, hidden]
+            attention_mask: Attention mask [batch, seq_len]
+
+        Returns:
+            delta: Gated additive update [batch, seq_len, hidden]
+        """
+        h_current = h
+
+        # Process through all transformer blocks
+        for i, block in enumerate(self.blocks):
+            # Attention block
+            attn_out, _ = block['attention'](
+                h_current, h_current, h_current,
+                key_padding_mask=attention_mask
+            )
+            h_attn = block['attn_layer_norm'](
+                h_current + block['attn_dropout'](attn_out)
+            )
+
+            # FFN block
+            ffn_out = block['ffn'](h_attn)
+            h_current = block['ffn_layer_norm'](h_attn + ffn_out)
+
+        # Final output becomes raw delta
+        delta_raw = h_current
+
+        # Apply adaptive gating (compare with original h, not h_current)
+        gate = self.gate(h, delta_raw)
+        delta = gate * delta_raw
+
+        return delta
+
+
+class PlasticNeuralNetworkExp4(nn.Module):
+    """
+    Experiment 4: PNN with Extended Depth (3 Transformer Blocks per Refiner)
+
+    Tests if deeper structure improves over Exp1's dual blocks.
+    Structure: 3 blocks × 4 steps = 12 transformer passes
+
+    Comparison:
+    - Exp1: 2 blocks × 4 steps = 8 passes (~59M params)
+    - Exp4: 3 blocks × 4 steps = 12 passes (~75M params)
+
+    Each block: Attention + FFN (768→2048→768)
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 30522,
+        hidden_size: int = 768,
+        num_heads: int = 12,
+        intermediate_size: int = 2048,
+        max_length: int = 128,
+        num_steps: int = 4,
+        dropout: float = 0.1,
+        num_blocks: int = 3
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_steps = num_steps
+
+        # Embeddings
+        self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.position_embeddings = nn.Embedding(max_length, hidden_size)
+        self.embedding_layer_norm = nn.LayerNorm(hidden_size)
+        self.embedding_dropout = nn.Dropout(dropout)
+
+        # Extended depth delta refiner (shared across steps)
+        self.delta_refiner = DeltaRefinerExtendedDepth(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            intermediate_size=intermediate_size,
+            dropout=dropout,
+            num_blocks=num_blocks
+        )
+
+        # MLM head
+        self.mlm_head = nn.Linear(hidden_size, vocab_size)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights following BERT"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.Embedding):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        return_all_steps: bool = False
+    ) -> torch.Tensor:
+        """Forward pass with recurrent delta refinement."""
+        batch_size, seq_len = input_ids.shape
+
+        # Get embeddings
+        token_embeds = self.token_embeddings(input_ids)
+        position_ids = torch.arange(
+            seq_len,
+            device=input_ids.device
+        ).unsqueeze(0).expand(batch_size, -1)
+        position_embeds = self.position_embeddings(position_ids)
+
+        hidden = token_embeds + position_embeds
+        hidden = self.embedding_layer_norm(hidden)
+        hidden = self.embedding_dropout(hidden)
+
+        # Convert attention mask format
+        attn_mask = None
+        if attention_mask is not None:
+            attn_mask = (attention_mask == 0)
+
+        all_outputs = [hidden] if return_all_steps else None
+
+        # Recurrent refinement with extended depth
+        for step in range(self.num_steps):
+            delta = self.delta_refiner(hidden, attn_mask)
+            hidden = hidden + delta
+
+            if return_all_steps:
+                all_outputs.append(hidden)
+
+        if return_all_steps:
+            return all_outputs
+        else:
+            return hidden
+
+    def get_mlm_loss(self, hidden: torch.Tensor, labels: torch.Tensor) -> tuple:
+        """Compute masked language modeling loss."""
+        logits = self.mlm_head(hidden)
+        loss = F.cross_entropy(
+            logits.view(-1, self.vocab_size),
+            labels.view(-1),
+            ignore_index=-100
+        )
+        return loss, logits
+
+    def compute_recurrent_loss(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        step_weights: list = None,
+        return_accuracies: bool = False
+    ) -> tuple:
+        """Compute weighted loss across all refinement steps."""
+        if step_weights is None:
+            step_weights = [0.1, 0.2, 0.3, 0.4]
+
+        # Get outputs from all steps
+        all_outputs = self.forward(
+            input_ids,
+            attention_mask,
+            return_all_steps=True
+        )
+
+        total_loss = 0.0
+        step_losses = []
+        step_accs = [] if return_accuracies else None
+
+        # Skip embedding (step 0), compute loss for refinement steps (1-4)
+        for step_idx, hidden in enumerate(all_outputs[1:], start=0):
+            loss, logits = self.get_mlm_loss(hidden, labels)
+            weight = step_weights[step_idx]
+            total_loss += weight * loss
+            step_losses.append(loss.item())
+
+            if return_accuracies:
+                # Calculate accuracy for this step
+                with torch.no_grad():
+                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    labels_flat = labels.view(-1)  # [B*L]
+                    mask = (labels_flat != -100)  # [B*L]
+                    correct = ((preds == labels_flat) & mask).sum().item()
+                    total_tokens = mask.sum().item()
+                    acc = correct / total_tokens if total_tokens > 0 else 0.0
+                    step_accs.append(acc)
+
+            # Delete logits immediately to free memory
+            del logits
+
+        if return_accuracies:
+            return total_loss, step_losses, step_accs
+        else:
+            return total_loss, step_losses
+
+
 class PlasticNeuralNetworkExp3(nn.Module):
     """
     Experiment 3: PNN with Big Single FFN
@@ -939,7 +1199,7 @@ def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
 
     Args:
         config: Model configuration dict
-        model_type: Type of model ('pnn', 'pnn_exp1', 'pnn_exp2')
+        model_type: Type of model ('pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3', 'pnn_exp4')
 
     Returns:
         model: PNN model instance
@@ -972,8 +1232,11 @@ def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
         exp3_config = config.copy()
         exp3_config['intermediate_size'] = 4096
         model = PlasticNeuralNetworkExp3(**exp3_config)
+    elif model_type == 'pnn_exp4':
+        # Exp4 uses extended depth (3 transformer blocks)
+        model = PlasticNeuralNetworkExp4(**config)
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3'")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3', 'pnn_exp4'")
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Created {model_type.upper()} with {total_params:,} parameters ({total_params/1e6:.1f}M)")
