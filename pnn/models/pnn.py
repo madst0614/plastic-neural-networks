@@ -1015,7 +1015,7 @@ class PlasticNeuralNetworkExp4(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    preds = logits.detach().argmax(dim=-1).view(-1)  # [B*L]
                     labels_flat = labels.view(-1)  # [B*L]
                     mask = (labels_flat != -100)  # [B*L]
                     correct = ((preds == labels_flat) & mask).sum().item()
@@ -1034,16 +1034,16 @@ class PlasticNeuralNetworkExp4(nn.Module):
 
 class PlasticNeuralNetworkExp5(nn.Module):
     """
-    Experiment 5: PNN with 5 Transformer Blocks (BERT-baseline parameter matched)
+    Experiment 5: PNN with 11 Transformer Blocks (BERT-baseline parameter matched)
 
     Tests structural efficiency by matching BERT-base's ~110M parameters.
-    Structure: 5 blocks × 4 steps = 20 transformer passes
+    Structure: 11 blocks × 4 steps = 44 transformer passes
 
     Comparison:
     - BERT-base: 12 layers, ~110M params, 12 passes
-    - Exp5: 5 blocks × 4 steps, ~107M params, 20 passes
+    - Exp5: 11 blocks × 4 steps, ~108M params, 44 passes
 
-    Key insight: Same params, but more passes through recurrent reuse.
+    Key insight: Same params, but 3.7x more passes through recurrent reuse.
     Tests if "parameter reuse + depth" beats "unique layers"
 
     Each block: Attention + FFN (768→2048→768)
@@ -1058,7 +1058,7 @@ class PlasticNeuralNetworkExp5(nn.Module):
         max_length: int = 128,
         num_steps: int = 4,
         dropout: float = 0.1,
-        num_blocks: int = 5
+        num_blocks: int = 11
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -1071,7 +1071,7 @@ class PlasticNeuralNetworkExp5(nn.Module):
         self.embedding_layer_norm = nn.LayerNorm(hidden_size)
         self.embedding_dropout = nn.Dropout(dropout)
 
-        # Extended depth delta refiner with 5 blocks (shared across steps)
+        # Extended depth delta refiner with 11 blocks (shared across steps)
         self.delta_refiner = DeltaRefinerExtendedDepth(
             hidden_size=hidden_size,
             num_heads=num_heads,
@@ -1127,7 +1127,7 @@ class PlasticNeuralNetworkExp5(nn.Module):
 
         all_outputs = [hidden] if return_all_steps else None
 
-        # Recurrent refinement with 5 blocks
+        # Recurrent refinement with 11 blocks
         for step in range(self.num_steps):
             delta = self.delta_refiner(hidden, attn_mask)
             hidden = hidden + delta
@@ -1183,7 +1183,7 @@ class PlasticNeuralNetworkExp5(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    preds = logits.detach().argmax(dim=-1).view(-1)  # [B*L]
                     labels_flat = labels.view(-1)  # [B*L]
                     mask = (labels_flat != -100)  # [B*L]
                     correct = ((preds == labels_flat) & mask).sum().item()
