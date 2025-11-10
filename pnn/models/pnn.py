@@ -851,10 +851,10 @@ class DeltaRefinerExtendedDepth(nn.Module):
         h_current = h
 
         # Process through all blocks EXCEPT the last one
-        # These blocks transform h with residual connections
+        # Key change: FFN WITHOUT residual (each block independently transforms)
         for i in range(len(self.blocks) - 1):
             block = self.blocks[i]
-            # Attention block
+            # Attention with residual (standard)
             attn_out, _ = block['attention'](
                 h_current, h_current, h_current,
                 key_padding_mask=attention_mask
@@ -863,9 +863,10 @@ class DeltaRefinerExtendedDepth(nn.Module):
                 h_current + block['attn_dropout'](attn_out)
             )
 
-            # FFN block with residual
-            ffn_out = block['ffn'](h_attn)
-            h_current = block['ffn_layer_norm'](h_attn + ffn_out)
+            # FFN WITHOUT residual (핵심!)
+            # Each block independently generates new representation
+            h_current = block['ffn'](h_attn)
+            # NO: h_current = h_attn + ffn_out (removed residual)
 
         # Last block: generate delta directly (like baseline DeltaRefiner)
         # NO residual connection on final FFN output
