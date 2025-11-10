@@ -35,10 +35,11 @@ def parse_args():
     # Model
     parser.add_argument('--model', type=str, default='pnn',
                        choices=['pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3', 'pnn_exp4', 'pnn_exp5', 'bert'],
-                       help='Model type: pnn (baseline), pnn_exp1 (dual blocks), pnn_exp2 (dual refiners), pnn_exp3 (big single FFN), pnn_exp4 (3 blocks), pnn_exp5 (5 blocks, BERT-matched)')
+                       help='Model type: pnn (baseline), pnn_exp1 (dual blocks), pnn_exp2 (dual refiners), pnn_exp3 (big single FFN), pnn_exp4 (3 blocks), pnn_exp5 (8 blocks, BERT-matched ~110M params)')
     parser.add_argument('--hidden_size', type=int, default=768)
     parser.add_argument('--num_heads', type=int, default=12)
-    parser.add_argument('--intermediate_size', type=int, default=2048)
+    parser.add_argument('--intermediate_size', type=int, default=2048,
+                       help='FFN intermediate size (use 3900 for pnn_exp5 to match BERT-base ~110M params)')
     parser.add_argument('--num_steps', type=int, default=4, help='PNN refinement steps (Exp2 with dual refiners needs 8 for fair comparison)')
     parser.add_argument('--max_length', type=int, default=128)
     parser.add_argument('--dropout', type=float, default=0.1)

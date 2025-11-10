@@ -819,13 +819,13 @@ class DeltaRefinerExtendedDepth(nn.Module):
                 'ffn_layer_norm': nn.LayerNorm(hidden_size)
             })
             # Initialize final FFN layer:
-            # - First (num_blocks-1) blocks: zero-init for stability (with residual)
-            # - Last block: normal-init for faster learning (generates delta)
+            # - First (num_blocks-1) blocks: normal-init (regular transformer blocks)
+            # - Last block: zero-init (generates delta, starts stable)
             if i < num_blocks - 1:
-                nn.init.zeros_(block['ffn'][3].weight)
+                nn.init.normal_(block['ffn'][3].weight, mean=0.0, std=0.02)
                 nn.init.zeros_(block['ffn'][3].bias)
             else:
-                nn.init.normal_(block['ffn'][3].weight, mean=0.0, std=0.02)
+                nn.init.zeros_(block['ffn'][3].weight)
                 nn.init.zeros_(block['ffn'][3].bias)
             self.blocks.append(block)
 
