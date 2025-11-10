@@ -821,9 +821,8 @@ class DeltaRefinerHierarchical(nn.Module):
                 'ffn_layer_norm': nn.LayerNorm(hidden_size)
             })
 
-            # Small initialization for mini-deltas
-            init_std = 0.02 / math.sqrt(num_blocks)
-            nn.init.normal_(block['ffn'][3].weight, mean=0.0, std=init_std)
+            # Zero-initialize final FFN layer for stable training
+            nn.init.zeros_(block['ffn'][3].weight)
             nn.init.zeros_(block['ffn'][3].bias)
 
             self.blocks.append(block)
