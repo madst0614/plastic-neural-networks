@@ -841,6 +841,7 @@ class DeltaRefinerExtendedDepth(nn.Module):
         Returns:
             delta: Gated additive update [batch, seq_len, hidden]
         """
+        h_original = h  # Keep original for delta computation
         h_current = h
 
         # Process through all transformer blocks
@@ -858,11 +859,12 @@ class DeltaRefinerExtendedDepth(nn.Module):
             ffn_out = block['ffn'](h_attn)
             h_current = block['ffn_layer_norm'](h_attn + ffn_out)
 
-        # Final output becomes raw delta
-        delta_raw = h_current
+        # Compute actual delta (difference from original)
+        # This is critical: delta should be the CHANGE, not the transformed value!
+        delta_raw = h_current - h_original
 
-        # Apply adaptive gating (compare with original h, not h_current)
-        gate = self.gate(h, delta_raw)
+        # Apply adaptive gating (compare original with delta)
+        gate = self.gate(h_original, delta_raw)
         delta = gate * delta_raw
 
         return delta
