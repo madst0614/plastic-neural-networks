@@ -565,7 +565,7 @@ class PlasticNeuralNetworkExp1(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step (detach to save memory)
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    preds = logits.detach().argmax(dim=-1).view(-1)  # [B*L]
                     labels_flat = labels.view(-1)  # [B*L]
                     mask = (labels_flat != -100)  # [B*L]
                     correct = ((preds == labels_flat) & mask).sum().item()
@@ -755,7 +755,7 @@ class PlasticNeuralNetworkExp2(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step (detach to save memory)
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    preds = logits.detach().argmax(dim=-1).view(-1)  # [B*L]
                     labels_flat = labels.view(-1)  # [B*L]
                     mask = (labels_flat != -100)  # [B*L]
                     correct = ((preds == labels_flat) & mask).sum().item()
@@ -1344,7 +1344,7 @@ class PlasticNeuralNetworkExp3(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step (detach to save memory)
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    preds = logits.detach().argmax(dim=-1).view(-1)  # [B*L]
                     labels_flat = labels.view(-1)  # [B*L]
                     mask = (labels_flat != -100)  # [B*L]
                     correct = ((preds == labels_flat) & mask).sum().item()

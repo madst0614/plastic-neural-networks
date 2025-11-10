@@ -181,7 +181,7 @@ def evaluate(model, dataloader, device, use_amp=True):
             total_loss += loss.item()
 
             # Calculate accuracy
-            preds = logits.argmax(dim=-1)  # [B*L]
+            preds = logits.argmax(dim=-1).view(-1)  # [B*L]
             labels_flat = labels.view(-1)  # [B*L]
             mask = (labels_flat != -100)  # [B*L]
             correct = (preds == labels_flat) & mask  # [B*L]
