@@ -34,8 +34,8 @@ def parse_args():
     
     # Model
     parser.add_argument('--model', type=str, default='pnn',
-                       choices=['pnn', 'pnn_exp1', 'pnn_exp2', 'bert'],
-                       help='Model type: pnn (baseline), pnn_exp1 (expanded FFN), pnn_exp2 (dual refiners)')
+                       choices=['pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3', 'bert'],
+                       help='Model type: pnn (baseline), pnn_exp1 (dual blocks), pnn_exp2 (dual refiners), pnn_exp3 (big single FFN)')
     parser.add_argument('--hidden_size', type=int, default=768)
     parser.add_argument('--num_heads', type=int, default=12)
     parser.add_argument('--intermediate_size', type=int, default=2048)

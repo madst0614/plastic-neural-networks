@@ -770,6 +770,166 @@ class PlasticNeuralNetworkExp2(nn.Module):
             return total_loss, step_losses
 
 
+class PlasticNeuralNetworkExp3(nn.Module):
+    """
+    Experiment 3: PNN with Big Single FFN
+
+    Tests whether capacity alone (big FFN) or structure (dual blocks) is more important.
+    Uses single attention + big FFN (intermediate_size=4096) to match Exp1's parameter count.
+
+    Comparison:
+    - Exp1: 2 attention + 2 FFN (2048 each) = ~11M params/refiner
+    - Exp3: 1 attention + 1 FFN (4096) = ~8.6M params/refiner
+
+    Both applied recurrently for 4 steps.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 30522,
+        hidden_size: int = 768,
+        num_heads: int = 12,
+        intermediate_size: int = 4096,  # Bigger than default!
+        max_length: int = 128,
+        num_steps: int = 4,
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_steps = num_steps
+
+        # Embeddings (same as original)
+        self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.position_embeddings = nn.Embedding(max_length, hidden_size)
+        self.embedding_layer_norm = nn.LayerNorm(hidden_size)
+        self.embedding_dropout = nn.Dropout(dropout)
+
+        # Single big delta refiner (shared across steps)
+        self.delta_refiner = DeltaRefiner(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            intermediate_size=intermediate_size,  # 4096!
+            dropout=dropout
+        )
+
+        # MLM head
+        self.mlm_head = nn.Linear(hidden_size, vocab_size)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights following BERT"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.Embedding):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        return_all_steps: bool = False
+    ) -> torch.Tensor:
+        """Forward pass with recurrent delta refinement."""
+        batch_size, seq_len = input_ids.shape
+
+        # Get embeddings
+        token_embeds = self.token_embeddings(input_ids)
+        position_ids = torch.arange(
+            seq_len,
+            device=input_ids.device
+        ).unsqueeze(0).expand(batch_size, -1)
+        position_embeds = self.position_embeddings(position_ids)
+
+        hidden = token_embeds + position_embeds
+        hidden = self.embedding_layer_norm(hidden)
+        hidden = self.embedding_dropout(hidden)
+
+        # Convert attention mask format
+        attn_mask = None
+        if attention_mask is not None:
+            attn_mask = (attention_mask == 0)
+
+        all_outputs = [hidden] if return_all_steps else None
+
+        # Recurrent refinement with big FFN
+        for step in range(self.num_steps):
+            delta = self.delta_refiner(hidden, attn_mask)
+            hidden = hidden + delta
+
+            if return_all_steps:
+                all_outputs.append(hidden)
+
+        if return_all_steps:
+            return all_outputs
+        else:
+            return hidden
+
+    def get_mlm_loss(self, hidden: torch.Tensor, labels: torch.Tensor) -> tuple:
+        """Compute MLM loss for given hidden states."""
+        logits = self.mlm_head(hidden)
+        logits = logits.view(-1, self.vocab_size)
+        labels = labels.view(-1)
+        loss = F.cross_entropy(logits, labels, ignore_index=-100)
+        return loss, logits.view(-1, logits.size(-1))
+
+    def compute_recurrent_loss(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        step_weights: list = None,
+        return_accuracies: bool = False
+    ) -> tuple:
+        """Compute weighted loss across all refinement steps."""
+        if step_weights is None:
+            step_weights = [0.1, 0.2, 0.3, 0.4]
+
+        # Get outputs from all steps
+        all_outputs = self.forward(
+            input_ids,
+            attention_mask,
+            return_all_steps=True
+        )
+
+        total_loss = 0.0
+        step_losses = []
+        step_accs = [] if return_accuracies else None
+
+        # Skip embedding (step 0), compute loss for refinement steps (1-4)
+        for step_idx, hidden in enumerate(all_outputs[1:], start=0):
+            loss, logits = self.get_mlm_loss(hidden, labels)
+            weight = step_weights[step_idx]
+            total_loss += weight * loss
+            step_losses.append(loss.item())
+
+            if return_accuracies:
+                # Calculate accuracy for this step (detach to save memory)
+                with torch.no_grad():
+                    preds = logits.detach().argmax(dim=-1)
+                    mask = (labels != -100)
+                    correct = ((preds == labels) & mask).sum().item()
+                    total_tokens = mask.sum().item()
+                    acc = correct / total_tokens if total_tokens > 0 else 0.0
+                    step_accs.append(acc)
+
+            # Delete logits immediately to free memory (~7.5GB per step)
+            del logits
+
+        if return_accuracies:
+            return total_loss, step_losses, step_accs
+        else:
+            return total_loss, step_losses
+
+
 def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
     """
     Factory function to create PNN model with config.
@@ -804,8 +964,13 @@ def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
         exp2_config = config.copy()
         exp2_config['num_iterations'] = exp2_config.pop('num_steps', 4) // 2
         model = PlasticNeuralNetworkExp2(**exp2_config)
+    elif model_type == 'pnn_exp3':
+        # Exp3 uses big single FFN (intermediate_size=4096)
+        exp3_config = config.copy()
+        exp3_config['intermediate_size'] = 4096
+        model = PlasticNeuralNetworkExp3(**exp3_config)
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn', 'pnn_exp1', 'pnn_exp2'")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3'")
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Created {model_type.upper()} with {total_params:,} parameters ({total_params/1e6:.1f}M)")
