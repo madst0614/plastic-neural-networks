@@ -818,9 +818,15 @@ class DeltaRefinerExtendedDepth(nn.Module):
                 ),
                 'ffn_layer_norm': nn.LayerNorm(hidden_size)
             })
-            # Zero-initialize final FFN layer for stable training
-            nn.init.zeros_(block['ffn'][3].weight)
-            nn.init.zeros_(block['ffn'][3].bias)
+            # Initialize final FFN layer:
+            # - First (num_blocks-1) blocks: zero-init for stability (with residual)
+            # - Last block: normal-init for faster learning (generates delta)
+            if i < num_blocks - 1:
+                nn.init.zeros_(block['ffn'][3].weight)
+                nn.init.zeros_(block['ffn'][3].bias)
+            else:
+                nn.init.normal_(block['ffn'][3].weight, mean=0.0, std=0.02)
+                nn.init.zeros_(block['ffn'][3].bias)
             self.blocks.append(block)
 
         # Adaptive gating

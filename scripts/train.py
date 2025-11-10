@@ -49,7 +49,8 @@ def parse_args():
     parser.add_argument('--gradient_accumulation', type=int, default=3)
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--warmup_steps', type=int, default=500)
+    parser.add_argument('--warmup_steps', type=int, default=100,
+                       help='Warmup steps (in optimizer steps, not batches)')
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--max_samples', type=int, default=1000000)
     
