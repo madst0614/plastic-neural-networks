@@ -1034,20 +1034,20 @@ class PlasticNeuralNetworkExp4(nn.Module):
 
 class PlasticNeuralNetworkExp5(nn.Module):
     """
-    Experiment 5: PNN with 8 Transformer Blocks (BERT-baseline parameter matched)
+    Experiment 5: PNN with 6 Transformer Blocks (BERT-baseline parameter matched)
 
     Tests structural efficiency by matching BERT-base's ~110M parameters.
-    Structure: 8 blocks × 4 steps = 32 transformer passes
+    Structure: 6 blocks × 4 steps = 24 transformer passes
 
     Comparison:
     - BERT-base: 12 layers, ~110M params, 12 passes
-    - Exp5: 8 blocks × 4 steps, ~109M params, 32 passes
+    - Exp5: 6 blocks × 4 steps, ~110M params, 24 passes
 
-    Key insight: Same params, but 2.7x more passes through recurrent reuse.
+    Key insight: Same params, but 2.0x more passes through recurrent reuse.
     Tests if "parameter reuse + depth" beats "unique layers"
 
-    Each block: Attention + FFN (768→3900→768)
-    Memory efficient: 8 blocks instead of 11 to avoid OOM
+    Each block: Attention + FFN (768→5664→768)
+    Memory optimized: 6 blocks to avoid OOM while maintaining 110M params
     """
 
     def __init__(
@@ -1055,11 +1055,11 @@ class PlasticNeuralNetworkExp5(nn.Module):
         vocab_size: int = 30522,
         hidden_size: int = 768,
         num_heads: int = 12,
-        intermediate_size: int = 3900,
+        intermediate_size: int = 5664,
         max_length: int = 128,
         num_steps: int = 4,
         dropout: float = 0.1,
-        num_blocks: int = 8
+        num_blocks: int = 6
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -1072,7 +1072,7 @@ class PlasticNeuralNetworkExp5(nn.Module):
         self.embedding_layer_norm = nn.LayerNorm(hidden_size)
         self.embedding_dropout = nn.Dropout(dropout)
 
-        # Extended depth delta refiner with 8 blocks (shared across steps)
+        # Extended depth delta refiner with 6 blocks (shared across steps)
         self.delta_refiner = DeltaRefinerExtendedDepth(
             hidden_size=hidden_size,
             num_heads=num_heads,
@@ -1128,7 +1128,7 @@ class PlasticNeuralNetworkExp5(nn.Module):
 
         all_outputs = [hidden] if return_all_steps else None
 
-        # Recurrent refinement with 8 blocks
+        # Recurrent refinement with 6 blocks
         for step in range(self.num_steps):
             delta = self.delta_refiner(hidden, attn_mask)
             hidden = hidden + delta
@@ -1405,9 +1405,9 @@ def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
         # Exp4 uses extended depth (3 transformer blocks)
         model = PlasticNeuralNetworkExp4(**config)
     elif model_type == 'pnn_exp5':
-        # Exp5 uses 8 transformer blocks with larger FFN (BERT-baseline matched ~110M)
+        # Exp5 uses 6 transformer blocks with larger FFN (BERT-baseline matched ~110M)
         exp5_config = config.copy()
-        exp5_config['intermediate_size'] = 3900  # Larger FFN to match 110M params
+        exp5_config['intermediate_size'] = 5664  # Larger FFN to match 110M params
         model = PlasticNeuralNetworkExp5(**exp5_config)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3', 'pnn_exp4', 'pnn_exp5'")
