@@ -565,9 +565,10 @@ class PlasticNeuralNetworkExp1(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step (detach to save memory)
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)
-                    mask = (labels != -100)
-                    correct = ((preds == labels) & mask).sum().item()
+                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    labels_flat = labels.view(-1)  # [B*L]
+                    mask = (labels_flat != -100)  # [B*L]
+                    correct = ((preds == labels_flat) & mask).sum().item()
                     total_tokens = mask.sum().item()
                     acc = correct / total_tokens if total_tokens > 0 else 0.0
                     step_accs.append(acc)
@@ -754,9 +755,10 @@ class PlasticNeuralNetworkExp2(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step (detach to save memory)
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)
-                    mask = (labels != -100)
-                    correct = ((preds == labels) & mask).sum().item()
+                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    labels_flat = labels.view(-1)  # [B*L]
+                    mask = (labels_flat != -100)  # [B*L]
+                    correct = ((preds == labels_flat) & mask).sum().item()
                     total_tokens = mask.sum().item()
                     acc = correct / total_tokens if total_tokens > 0 else 0.0
                     step_accs.append(acc)
@@ -914,9 +916,10 @@ class PlasticNeuralNetworkExp3(nn.Module):
             if return_accuracies:
                 # Calculate accuracy for this step (detach to save memory)
                 with torch.no_grad():
-                    preds = logits.detach().argmax(dim=-1)
-                    mask = (labels != -100)
-                    correct = ((preds == labels) & mask).sum().item()
+                    preds = logits.detach().argmax(dim=-1)  # [B*L]
+                    labels_flat = labels.view(-1)  # [B*L]
+                    mask = (labels_flat != -100)  # [B*L]
+                    correct = ((preds == labels_flat) & mask).sum().item()
                     total_tokens = mask.sum().item()
                     acc = correct / total_tokens if total_tokens > 0 else 0.0
                     step_accs.append(acc)
