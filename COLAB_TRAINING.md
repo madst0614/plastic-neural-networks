@@ -154,13 +154,30 @@ If you get OOM (Out of Memory):
 --max_samples 100000
 ```
 
-### For Colab Pro (A100 GPU)
+### For Colab Pro (A100 80GB) - RECOMMENDED
+
+**Fast Training (~15-20 it/s)**
 ```bash
-# Aggressive settings
---batch_size 512 \
---gradient_accumulation 2 \
---max_samples 500000
+!python scripts/train.py \
+  --model pnn_exp1 \
+  --batch_size 1024 \
+  --gradient_accumulation 1 \
+  --num_workers 12 \
+  --max_samples 200000 \
+  --epochs 15 \
+  --lr 3e-4 \
+  --use_amp \
+  --use_tf32 \
+  --checkpoint_dir checkpoints/exp1_fast
+
+# Or use the pre-configured YAML
+!python scripts/train.py --config configs/pnn_a100.yaml
 ```
+
+**Expected Performance:**
+- Speed: 15-20 iterations/second
+- Training time: ~1-1.5 hours for 200K samples
+- Memory usage: ~30-40GB / 80GB
 
 ---
 
