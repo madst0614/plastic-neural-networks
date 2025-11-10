@@ -210,7 +210,7 @@ def train_epoch(
     step_losses = [0.0] * args.num_steps
     step_accs = [0.0] * args.num_steps
 
-    progress = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
+    progress = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}", mininterval=1.0)
 
     for batch_idx, batch in enumerate(progress):
         input_ids = batch['input_ids'].to(device)
