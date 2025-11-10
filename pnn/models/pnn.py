@@ -308,54 +308,71 @@ class PlasticNeuralNetwork(nn.Module):
 
 class DeltaRefinerExpanded(nn.Module):
     """
-    Experiment 1: Delta Refiner with Expanded FFN
+    Experiment 1: Delta Refiner with Dual Attention + Dual FFN
 
-    Uses staged (step-wise) dimension expansion in FFN to increase capacity
-    while minimizing information loss: 768 -> 1408 -> 1536 -> 1408 -> 768
-    (~2x FFN parameters compared to baseline)
+    Structure: Attention1 → FFN1 → Attention2 → FFN2 → Gate
+    Increases capacity by stacking two transformer-like blocks within a single refiner.
+    Total added params: ~5.55M (attention: 2.4M, FFN: 3.15M)
     """
 
     def __init__(
         self,
         hidden_size: int = 768,
         num_heads: int = 12,
+        intermediate_size: int = 2048,
         dropout: float = 0.1
     ):
         super().__init__()
         self.hidden_size = hidden_size
 
-        # Multi-head self-attention (same as original)
-        self.attention = nn.MultiheadAttention(
+        # First attention block
+        self.attention1 = nn.MultiheadAttention(
             embed_dim=hidden_size,
             num_heads=num_heads,
             dropout=dropout,
             batch_first=True
         )
-        self.attn_layer_norm = nn.LayerNorm(hidden_size)
-        self.attn_dropout = nn.Dropout(dropout)
+        self.attn1_layer_norm = nn.LayerNorm(hidden_size)
+        self.attn1_dropout = nn.Dropout(dropout)
 
-        # Expanded staged FFN: 768 -> 1408 -> 1536 -> 1408 -> 768 (2x capacity)
-        self.ffn = nn.Sequential(
-            nn.Linear(768, 1408),       # Expand +640
+        # First FFN block
+        self.ffn1 = nn.Sequential(
+            nn.Linear(hidden_size, intermediate_size),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(1408, 1536),      # Expand +128
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(1536, 1408),      # Contract -128
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(1408, 768),       # Contract -640 (back to hidden_size)
+            nn.Linear(intermediate_size, hidden_size),
             nn.Dropout(dropout)
         )
-        self.ffn_layer_norm = nn.LayerNorm(hidden_size)
+        self.ffn1_layer_norm = nn.LayerNorm(hidden_size)
 
-        # Adaptive gating (same as original)
+        # Second attention block
+        self.attention2 = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.attn2_layer_norm = nn.LayerNorm(hidden_size)
+        self.attn2_dropout = nn.Dropout(dropout)
+
+        # Second FFN block
+        self.ffn2 = nn.Sequential(
+            nn.Linear(hidden_size, intermediate_size),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(intermediate_size, hidden_size),
+            nn.Dropout(dropout)
+        )
+        self.ffn2_layer_norm = nn.LayerNorm(hidden_size)
+
+        # Adaptive gating
         self.gate = QueryKeyGate(hidden_size)
 
-        # Zero-initialize final FFN layer for stable training
-        nn.init.zeros_(self.ffn[9].weight)  # Last Linear layer (1280 -> 768)
-        nn.init.zeros_(self.ffn[9].bias)
+        # Zero-initialize final FFN layers for stable training
+        nn.init.zeros_(self.ffn1[3].weight)
+        nn.init.zeros_(self.ffn1[3].bias)
+        nn.init.zeros_(self.ffn2[3].weight)
+        nn.init.zeros_(self.ffn2[3].bias)
 
     def forward(
         self,
@@ -372,13 +389,19 @@ class DeltaRefinerExpanded(nn.Module):
         Returns:
             delta: Gated additive update [batch, seq_len, hidden]
         """
-        # Self-attention with residual
-        attn_out, _ = self.attention(h, h, h, key_padding_mask=attention_mask)
-        h_attn = self.attn_layer_norm(h + self.attn_dropout(attn_out))
+        # First transformer block: Attention1 + FFN1
+        attn_out1, _ = self.attention1(h, h, h, key_padding_mask=attention_mask)
+        h_attn1 = self.attn1_layer_norm(h + self.attn1_dropout(attn_out1))
 
-        # Feed-forward to compute raw delta (with expanded capacity)
-        delta_raw = self.ffn(h_attn)
-        delta_raw = self.ffn_layer_norm(delta_raw)
+        ffn_out1 = self.ffn1(h_attn1)
+        h_ffn1 = self.ffn1_layer_norm(h_attn1 + ffn_out1)
+
+        # Second transformer block: Attention2 + FFN2
+        attn_out2, _ = self.attention2(h_ffn1, h_ffn1, h_ffn1, key_padding_mask=attention_mask)
+        h_attn2 = self.attn2_layer_norm(h_ffn1 + self.attn2_dropout(attn_out2))
+
+        delta_raw = self.ffn2(h_attn2)
+        delta_raw = self.ffn2_layer_norm(delta_raw)
 
         # Apply adaptive gating
         gate = self.gate(h, delta_raw)
@@ -389,9 +412,10 @@ class DeltaRefinerExpanded(nn.Module):
 
 class PlasticNeuralNetworkExp1(nn.Module):
     """
-    Experiment 1: PNN with Expanded FFN
+    Experiment 1: PNN with Dual Attention + Dual FFN Refiner
 
-    Same architecture as PNN but with staged FFN expansion for increased capacity.
+    Each refiner contains 2 transformer blocks (Attention + FFN) stacked sequentially.
+    This increases capacity while maintaining the recurrent refinement paradigm.
     """
 
     def __init__(
@@ -399,6 +423,7 @@ class PlasticNeuralNetworkExp1(nn.Module):
         vocab_size: int = 30522,
         hidden_size: int = 768,
         num_heads: int = 12,
+        intermediate_size: int = 2048,
         max_length: int = 128,
         num_steps: int = 4,
         dropout: float = 0.1
@@ -418,6 +443,7 @@ class PlasticNeuralNetworkExp1(nn.Module):
         self.delta_refiner = DeltaRefinerExpanded(
             hidden_size=hidden_size,
             num_heads=num_heads,
+            intermediate_size=intermediate_size,
             dropout=dropout
         )
 
@@ -706,9 +732,8 @@ def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
     if model_type == 'pnn':
         model = PlasticNeuralNetwork(**config)
     elif model_type == 'pnn_exp1':
-        # Exp1 doesn't use intermediate_size (has fixed staged expansion)
-        exp1_config = {k: v for k, v in config.items() if k != 'intermediate_size'}
-        model = PlasticNeuralNetworkExp1(**exp1_config)
+        # Exp1 uses dual attention + dual FFN structure
+        model = PlasticNeuralNetworkExp1(**config)
     elif model_type == 'pnn_exp2':
         # Exp2 uses num_iterations instead of num_steps
         exp2_config = config.copy()
