@@ -179,11 +179,12 @@ def evaluate(model, dataloader, device, use_amp=True):
                 loss, logits = model.get_mlm_loss(hidden, labels)
             
             total_loss += loss.item()
-            
+
             # Calculate accuracy
-            preds = logits.argmax(dim=-1)
-            mask = (labels != -100)
-            correct = (preds == labels) & mask
+            preds = logits.argmax(dim=-1)  # [B*L]
+            labels_flat = labels.view(-1)  # [B*L]
+            mask = (labels_flat != -100)  # [B*L]
+            correct = (preds == labels_flat) & mask  # [B*L]
             total_correct += correct.sum().item()
             total_tokens += mask.sum().item()
     
