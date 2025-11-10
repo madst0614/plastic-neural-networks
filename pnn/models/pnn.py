@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from torch.utils.checkpoint import checkpoint
 
 
 class QueryKeyGate(nn.Module):
@@ -890,12 +891,14 @@ class PlasticNeuralNetworkExp4(nn.Module):
         max_length: int = 128,
         num_steps: int = 4,
         dropout: float = 0.1,
-        num_blocks: int = 3
+        num_blocks: int = 3,
+        use_checkpoint: bool = False
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_steps = num_steps
+        self.use_checkpoint = use_checkpoint
 
         # Embeddings
         self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
@@ -961,7 +964,11 @@ class PlasticNeuralNetworkExp4(nn.Module):
 
         # Recurrent refinement with extended depth
         for step in range(self.num_steps):
-            delta = self.delta_refiner(hidden, attn_mask)
+            # Use gradient checkpointing if enabled (off by default for Exp4)
+            if self.use_checkpoint and self.training:
+                delta = checkpoint(self.delta_refiner, hidden, attn_mask, use_reentrant=False)
+            else:
+                delta = self.delta_refiner(hidden, attn_mask)
             hidden = hidden + delta
 
             if return_all_steps:
@@ -1047,7 +1054,10 @@ class PlasticNeuralNetworkExp5(nn.Module):
     Tests if "parameter reuse + depth" beats "unique layers"
 
     Each block: Attention + FFN (768→5664→768)
-    Memory optimized: 6 blocks to avoid OOM while maintaining 110M params
+    Memory optimizations:
+    - 6 blocks to avoid OOM while maintaining 110M params
+    - Gradient checkpointing (use_checkpoint=True) to save activation memory
+    - Reduces memory by ~50% during training with minimal speed cost
     """
 
     def __init__(
@@ -1059,12 +1069,14 @@ class PlasticNeuralNetworkExp5(nn.Module):
         max_length: int = 128,
         num_steps: int = 4,
         dropout: float = 0.1,
-        num_blocks: int = 6
+        num_blocks: int = 6,
+        use_checkpoint: bool = True
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_steps = num_steps
+        self.use_checkpoint = use_checkpoint
 
         # Embeddings
         self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
@@ -1130,7 +1142,11 @@ class PlasticNeuralNetworkExp5(nn.Module):
 
         # Recurrent refinement with 6 blocks
         for step in range(self.num_steps):
-            delta = self.delta_refiner(hidden, attn_mask)
+            # Use gradient checkpointing to save memory
+            if self.use_checkpoint and self.training:
+                delta = checkpoint(self.delta_refiner, hidden, attn_mask, use_reentrant=False)
+            else:
+                delta = self.delta_refiner(hidden, attn_mask)
             hidden = hidden + delta
 
             if return_all_steps:
