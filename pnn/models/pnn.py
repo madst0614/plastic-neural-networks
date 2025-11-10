@@ -572,6 +572,9 @@ class PlasticNeuralNetworkExp1(nn.Module):
                     acc = correct / total_tokens if total_tokens > 0 else 0.0
                     step_accs.append(acc)
 
+            # Delete logits immediately to free memory (~7.5GB per step)
+            del logits
+
         if return_accuracies:
             return total_loss, step_losses, step_accs
         else:
@@ -757,6 +760,9 @@ class PlasticNeuralNetworkExp2(nn.Module):
                     total_tokens = mask.sum().item()
                     acc = correct / total_tokens if total_tokens > 0 else 0.0
                     step_accs.append(acc)
+
+            # Delete logits immediately to free memory (~7.5GB per step)
+            del logits
 
         if return_accuracies:
             return total_loss, step_losses, step_accs
