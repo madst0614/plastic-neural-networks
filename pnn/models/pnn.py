@@ -773,16 +773,18 @@ class PlasticNeuralNetworkExp2(nn.Module):
             return total_loss, step_losses
 
 
-class DeltaRefinerExtendedDepth(nn.Module):
+class DeltaRefinerHierarchical(nn.Module):
     """
-    Experiment 4: Delta Refiner with Extended Depth (3 Transformer Blocks)
+    Hierarchical Mini-Delta Accumulation
 
-    Structure: (Attention1 → FFN1) → (Attention2 → FFN2) → (Attention3 → FFN3) → Gate
-    Tests if deeper structure (3 blocks) outperforms dual blocks (Exp1).
-    Each FFN: 768 → 2048 → 768 (proven size from Exp1)
+    Each block proposes a mini-delta, accumulated to form final delta.
+    All processing references h_original + accumulated_delta.
 
-    Total params per refiner: ~16.7M
-    Applied recurrently for 4 steps = 12 transformer passes total
+    Key features:
+    - Each block generates mini-delta based on h_original + accumulated_delta
+    - Mini-gates for each block's proposal
+    - Final gate on total accumulated delta
+    - Small initialization (0.02 / sqrt(num_blocks)) for stability
     """
 
     def __init__(
@@ -791,13 +793,13 @@ class DeltaRefinerExtendedDepth(nn.Module):
         num_heads: int = 12,
         intermediate_size: int = 2048,
         dropout: float = 0.1,
-        num_blocks: int = 3
+        num_blocks: int = 8
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_blocks = num_blocks
 
-        # Create transformer blocks dynamically
+        # Create transformer blocks
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             block = nn.ModuleDict({
@@ -818,19 +820,21 @@ class DeltaRefinerExtendedDepth(nn.Module):
                 ),
                 'ffn_layer_norm': nn.LayerNorm(hidden_size)
             })
-            # Initialize final FFN layer:
-            # - First (num_blocks-1) blocks: normal-init (regular transformer blocks)
-            # - Last block: zero-init (generates delta, starts stable)
-            if i < num_blocks - 1:
-                nn.init.normal_(block['ffn'][3].weight, mean=0.0, std=0.02)
-                nn.init.zeros_(block['ffn'][3].bias)
-            else:
-                nn.init.zeros_(block['ffn'][3].weight)
-                nn.init.zeros_(block['ffn'][3].bias)
+
+            # Small initialization for mini-deltas
+            init_std = 0.02 / math.sqrt(num_blocks)
+            nn.init.normal_(block['ffn'][3].weight, mean=0.0, std=init_std)
+            nn.init.zeros_(block['ffn'][3].bias)
+
             self.blocks.append(block)
 
-        # Adaptive gating
-        self.gate = QueryKeyGate(hidden_size)
+        # Mini-gates for each block
+        self.mini_gates = nn.ModuleList([
+            QueryKeyGate(hidden_size) for _ in range(num_blocks)
+        ])
+
+        # Final gate for accumulated delta
+        self.final_gate = QueryKeyGate(hidden_size)
 
     def forward(
         self,
@@ -838,56 +842,47 @@ class DeltaRefinerExtendedDepth(nn.Module):
         attention_mask: torch.Tensor = None
     ) -> torch.Tensor:
         """
-        Compute delta through extended depth processing.
+        Compute delta through hierarchical mini-delta accumulation.
 
         Args:
             h: Current representation [batch, seq_len, hidden]
-            attention_mask: Attention mask [batch, seq_len]
+            attention_mask: Attention mask
 
         Returns:
-            delta: Gated additive update [batch, seq_len, hidden]
+            delta: Final gated accumulated delta
         """
-        h_original = h  # Keep original for gating
-        h_current = h
+        h_original = h
+        accumulated_delta = torch.zeros_like(h)
 
-        # Process through all blocks EXCEPT the last one
-        # Key change: FFN WITHOUT residual (each block independently transforms)
-        for i in range(len(self.blocks) - 1):
-            block = self.blocks[i]
-            # Attention with residual (standard)
+        for i, block in enumerate(self.blocks):
+            # Current state = original + accumulated changes
+            h_with_delta = h_original + accumulated_delta
+
+            # Attention block
             attn_out, _ = block['attention'](
-                h_current, h_current, h_current,
+                h_with_delta, h_with_delta, h_with_delta,
                 key_padding_mask=attention_mask
             )
             h_attn = block['attn_layer_norm'](
-                h_current + block['attn_dropout'](attn_out)
+                h_with_delta + block['attn_dropout'](attn_out)
             )
 
-            # FFN WITHOUT residual (핵심!)
-            # Each block independently generates new representation
-            h_current = block['ffn'](h_attn)
-            # NO: h_current = h_attn + ffn_out (removed residual)
+            # Propose mini-delta
+            mini_delta_raw = block['ffn'](h_attn)
+            mini_delta_raw = block['ffn_layer_norm'](mini_delta_raw)
 
-        # Last block: generate delta directly (like baseline DeltaRefiner)
-        # NO residual connection on final FFN output
-        last_block = self.blocks[-1]
-        attn_out, _ = last_block['attention'](
-            h_current, h_current, h_current,
-            key_padding_mask=attention_mask
-        )
-        h_attn = last_block['attn_layer_norm'](
-            h_current + last_block['attn_dropout'](attn_out)
-        )
+            # Gate this block's proposal
+            mini_gate = self.mini_gates[i](h_original, mini_delta_raw)
+            mini_delta = mini_gate * mini_delta_raw
 
-        # FFN output becomes delta_raw directly (no residual)
-        delta_raw = last_block['ffn'](h_attn)
-        delta_raw = last_block['ffn_layer_norm'](delta_raw)
+            # Accumulate
+            accumulated_delta = accumulated_delta + mini_delta
 
-        # Apply adaptive gating (compare original with delta)
-        gate = self.gate(h_original, delta_raw)
-        delta = gate * delta_raw
+        # Final gate on total accumulated delta
+        final_gate = self.final_gate(h_original, accumulated_delta)
+        final_delta = final_gate * accumulated_delta
 
-        return delta
+        return final_delta
 
 
 class PlasticNeuralNetworkExp4(nn.Module):
@@ -928,8 +923,8 @@ class PlasticNeuralNetworkExp4(nn.Module):
         self.embedding_layer_norm = nn.LayerNorm(hidden_size)
         self.embedding_dropout = nn.Dropout(dropout)
 
-        # Extended depth delta refiner (shared across steps)
-        self.delta_refiner = DeltaRefinerExtendedDepth(
+        # Hierarchical delta refiner (shared across steps)
+        self.delta_refiner = DeltaRefinerHierarchical(
             hidden_size=hidden_size,
             num_heads=num_heads,
             intermediate_size=intermediate_size,
@@ -1111,8 +1106,8 @@ class PlasticNeuralNetworkExp5(nn.Module):
         self.embedding_layer_norm = nn.LayerNorm(hidden_size)
         self.embedding_dropout = nn.Dropout(dropout)
 
-        # Extended depth delta refiner with 8 blocks (shared across steps)
-        self.delta_refiner = DeltaRefinerExtendedDepth(
+        # Hierarchical delta refiner with 8 blocks (shared across steps)
+        self.delta_refiner = DeltaRefinerHierarchical(
             hidden_size=hidden_size,
             num_heads=num_heads,
             intermediate_size=intermediate_size,
