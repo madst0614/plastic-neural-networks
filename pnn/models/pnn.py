@@ -306,15 +306,389 @@ class PlasticNeuralNetwork(nn.Module):
         return total_loss, step_losses
 
 
-def create_pnn_model(config: dict = None) -> PlasticNeuralNetwork:
+class DeltaRefinerExpanded(nn.Module):
+    """
+    Experiment 1: Delta Refiner with Expanded FFN
+
+    Uses staged (step-wise) dimension expansion in FFN to increase capacity
+    while minimizing information loss: 768 -> 1408 -> 1536 -> 1408 -> 768
+    (~2x FFN parameters compared to baseline)
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        num_heads: int = 12,
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # Multi-head self-attention (same as original)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.attn_layer_norm = nn.LayerNorm(hidden_size)
+        self.attn_dropout = nn.Dropout(dropout)
+
+        # Expanded staged FFN: 768 -> 1408 -> 1536 -> 1408 -> 768 (2x capacity)
+        self.ffn = nn.Sequential(
+            nn.Linear(768, 1408),       # Expand +640
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(1408, 1536),      # Expand +128
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(1536, 1408),      # Contract -128
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(1408, 768),       # Contract -640 (back to hidden_size)
+            nn.Dropout(dropout)
+        )
+        self.ffn_layer_norm = nn.LayerNorm(hidden_size)
+
+        # Adaptive gating (same as original)
+        self.gate = QueryKeyGate(hidden_size)
+
+        # Zero-initialize final FFN layer for stable training
+        nn.init.zeros_(self.ffn[9].weight)  # Last Linear layer (1280 -> 768)
+        nn.init.zeros_(self.ffn[9].bias)
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        attention_mask: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Compute delta (additive update) for current representation.
+
+        Args:
+            h: Current representation [batch, seq_len, hidden]
+            attention_mask: Attention mask [batch, seq_len]
+
+        Returns:
+            delta: Gated additive update [batch, seq_len, hidden]
+        """
+        # Self-attention with residual
+        attn_out, _ = self.attention(h, h, h, key_padding_mask=attention_mask)
+        h_attn = self.attn_layer_norm(h + self.attn_dropout(attn_out))
+
+        # Feed-forward to compute raw delta (with expanded capacity)
+        delta_raw = self.ffn(h_attn)
+        delta_raw = self.ffn_layer_norm(delta_raw)
+
+        # Apply adaptive gating
+        gate = self.gate(h, delta_raw)
+        delta = gate * delta_raw
+
+        return delta
+
+
+class PlasticNeuralNetworkExp1(nn.Module):
+    """
+    Experiment 1: PNN with Expanded FFN
+
+    Same architecture as PNN but with staged FFN expansion for increased capacity.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 30522,
+        hidden_size: int = 768,
+        num_heads: int = 12,
+        max_length: int = 128,
+        num_steps: int = 4,
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_steps = num_steps
+
+        # Embeddings (same as original)
+        self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.position_embeddings = nn.Embedding(max_length, hidden_size)
+        self.embedding_layer_norm = nn.LayerNorm(hidden_size)
+        self.embedding_dropout = nn.Dropout(dropout)
+
+        # Single expanded delta refiner (shared across steps)
+        self.delta_refiner = DeltaRefinerExpanded(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            dropout=dropout
+        )
+
+        # MLM head
+        self.mlm_head = nn.Linear(hidden_size, vocab_size)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights following BERT"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.Embedding):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        return_all_steps: bool = False
+    ) -> torch.Tensor:
+        """Forward pass with recurrent delta refinement."""
+        batch_size, seq_len = input_ids.shape
+
+        # Get embeddings
+        token_embeds = self.token_embeddings(input_ids)
+
+        # Add position embeddings
+        position_ids = torch.arange(
+            seq_len,
+            device=input_ids.device
+        ).unsqueeze(0).expand(batch_size, -1)
+        position_embeds = self.position_embeddings(position_ids)
+
+        hidden = token_embeds + position_embeds
+        hidden = self.embedding_layer_norm(hidden)
+        hidden = self.embedding_dropout(hidden)
+
+        # Convert attention mask format
+        attn_mask = None
+        if attention_mask is not None:
+            attn_mask = (attention_mask == 0)
+
+        all_outputs = [hidden] if return_all_steps else None
+
+        # Recurrent refinement
+        for step in range(self.num_steps):
+            delta = self.delta_refiner(hidden, attn_mask)
+            hidden = hidden + delta
+
+            if return_all_steps:
+                all_outputs.append(hidden)
+
+        if return_all_steps:
+            return all_outputs
+        else:
+            return hidden
+
+    def get_mlm_loss(self, hidden: torch.Tensor, labels: torch.Tensor) -> tuple:
+        """Compute masked language modeling loss."""
+        logits = self.mlm_head(hidden)
+        loss = F.cross_entropy(
+            logits.view(-1, self.vocab_size),
+            labels.view(-1),
+            ignore_index=-100
+        )
+        return loss, logits
+
+    def compute_recurrent_loss(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        step_weights: list = None
+    ) -> tuple:
+        """Compute weighted loss across all refinement steps."""
+        if step_weights is None:
+            step_weights = [0.1, 0.2, 0.3, 0.4]
+
+        # Get outputs from all steps
+        all_outputs = self.forward(
+            input_ids,
+            attention_mask,
+            return_all_steps=True
+        )
+
+        total_loss = 0.0
+        step_losses = []
+
+        # Skip embedding (step 0), compute loss for refinement steps (1-4)
+        for step_idx, hidden in enumerate(all_outputs[1:], start=0):
+            loss, _ = self.get_mlm_loss(hidden, labels)
+            weight = step_weights[step_idx]
+            total_loss += weight * loss
+            step_losses.append(loss.item())
+
+        return total_loss, step_losses
+
+
+class PlasticNeuralNetworkExp2(nn.Module):
+    """
+    Experiment 2: PNN with Dual Refiners (Alternating)
+
+    Uses two independent refiners applied alternately for increased capacity.
+    Each iteration applies refiner1 then refiner2.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 30522,
+        hidden_size: int = 768,
+        num_heads: int = 12,
+        intermediate_size: int = 2048,
+        max_length: int = 128,
+        num_iterations: int = 2,  # 2 iterations × 2 refiners = 4 steps
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_iterations = num_iterations
+
+        # Embeddings (same as original)
+        self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.position_embeddings = nn.Embedding(max_length, hidden_size)
+        self.embedding_layer_norm = nn.LayerNorm(hidden_size)
+        self.embedding_dropout = nn.Dropout(dropout)
+
+        # Two independent delta refiners
+        self.delta_refiner1 = DeltaRefiner(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            intermediate_size=intermediate_size,
+            dropout=dropout
+        )
+
+        self.delta_refiner2 = DeltaRefiner(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            intermediate_size=intermediate_size,
+            dropout=dropout
+        )
+
+        # MLM head
+        self.mlm_head = nn.Linear(hidden_size, vocab_size)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights following BERT"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.Embedding):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        return_all_steps: bool = False
+    ) -> torch.Tensor:
+        """Forward pass with alternating dual refiners."""
+        batch_size, seq_len = input_ids.shape
+
+        # Get embeddings
+        token_embeds = self.token_embeddings(input_ids)
+
+        # Add position embeddings
+        position_ids = torch.arange(
+            seq_len,
+            device=input_ids.device
+        ).unsqueeze(0).expand(batch_size, -1)
+        position_embeds = self.position_embeddings(position_ids)
+
+        hidden = token_embeds + position_embeds
+        hidden = self.embedding_layer_norm(hidden)
+        hidden = self.embedding_dropout(hidden)
+
+        # Convert attention mask format
+        attn_mask = None
+        if attention_mask is not None:
+            attn_mask = (attention_mask == 0)
+
+        all_outputs = [hidden] if return_all_steps else None
+
+        # Alternating dual refinement
+        for iteration in range(self.num_iterations):
+            # Apply refiner 1
+            delta1 = self.delta_refiner1(hidden, attn_mask)
+            hidden = hidden + delta1
+
+            if return_all_steps:
+                all_outputs.append(hidden)
+
+            # Apply refiner 2
+            delta2 = self.delta_refiner2(hidden, attn_mask)
+            hidden = hidden + delta2
+
+            if return_all_steps:
+                all_outputs.append(hidden)
+
+        if return_all_steps:
+            return all_outputs
+        else:
+            return hidden
+
+    def get_mlm_loss(self, hidden: torch.Tensor, labels: torch.Tensor) -> tuple:
+        """Compute masked language modeling loss."""
+        logits = self.mlm_head(hidden)
+        loss = F.cross_entropy(
+            logits.view(-1, self.vocab_size),
+            labels.view(-1),
+            ignore_index=-100
+        )
+        return loss, logits
+
+    def compute_recurrent_loss(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        step_weights: list = None
+    ) -> tuple:
+        """Compute weighted loss across all refinement steps."""
+        if step_weights is None:
+            step_weights = [0.1, 0.2, 0.3, 0.4]  # 4 steps total
+
+        # Get outputs from all steps
+        all_outputs = self.forward(
+            input_ids,
+            attention_mask,
+            return_all_steps=True
+        )
+
+        total_loss = 0.0
+        step_losses = []
+
+        # Skip embedding (step 0), compute loss for refinement steps (1-4)
+        for step_idx, hidden in enumerate(all_outputs[1:], start=0):
+            loss, _ = self.get_mlm_loss(hidden, labels)
+            weight = step_weights[step_idx]
+            total_loss += weight * loss
+            step_losses.append(loss.item())
+
+        return total_loss, step_losses
+
+
+def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
     """
     Factory function to create PNN model with config.
-    
+
     Args:
         config: Model configuration dict
-        
+        model_type: Type of model ('pnn', 'pnn_exp1', 'pnn_exp2')
+
     Returns:
-        model: PlasticNeuralNetwork instance
+        model: PNN model instance
     """
     if config is None:
         # Default config from paper
@@ -327,12 +701,25 @@ def create_pnn_model(config: dict = None) -> PlasticNeuralNetwork:
             'num_steps': 4,
             'dropout': 0.1
         }
-    
-    model = PlasticNeuralNetwork(**config)
-    
+
+    # Create model based on type
+    if model_type == 'pnn':
+        model = PlasticNeuralNetwork(**config)
+    elif model_type == 'pnn_exp1':
+        # Exp1 doesn't use intermediate_size (has fixed staged expansion)
+        exp1_config = {k: v for k, v in config.items() if k != 'intermediate_size'}
+        model = PlasticNeuralNetworkExp1(**exp1_config)
+    elif model_type == 'pnn_exp2':
+        # Exp2 uses num_iterations instead of num_steps
+        exp2_config = config.copy()
+        exp2_config['num_iterations'] = exp2_config.pop('num_steps', 4) // 2
+        model = PlasticNeuralNetworkExp2(**exp2_config)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn', 'pnn_exp1', 'pnn_exp2'")
+
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Created PNN with {total_params:,} parameters ({total_params/1e6:.1f}M)")
-    
+    print(f"Created {model_type.upper()} with {total_params:,} parameters ({total_params/1e6:.1f}M)")
+
     return model
 
 

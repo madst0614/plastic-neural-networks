@@ -33,7 +33,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train Plastic Neural Networks')
     
     # Model
-    parser.add_argument('--model', type=str, default='pnn', choices=['pnn', 'bert'])
+    parser.add_argument('--model', type=str, default='pnn',
+                       choices=['pnn', 'pnn_exp1', 'pnn_exp2', 'bert'],
+                       help='Model type: pnn (baseline), pnn_exp1 (expanded FFN), pnn_exp2 (dual refiners)')
     parser.add_argument('--hidden_size', type=int, default=768)
     parser.add_argument('--num_heads', type=int, default=12)
     parser.add_argument('--intermediate_size', type=int, default=2048)
@@ -300,7 +302,7 @@ def main():
         'num_steps': args.num_steps,
         'dropout': args.dropout
     }
-    model = create_pnn_model(model_config)
+    model = create_pnn_model(model_config, model_type=args.model)
     model = model.to(device)
     
     # Create optimizer and scheduler
