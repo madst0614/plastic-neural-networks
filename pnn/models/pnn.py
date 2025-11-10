@@ -998,9 +998,6 @@ class PlasticNeuralNetworkExp4(nn.Module):
         return_accuracies: bool = False
     ) -> tuple:
         """Compute weighted loss across all refinement steps."""
-        if step_weights is None:
-            step_weights = [0.1, 0.2, 0.3, 0.4]
-
         # Get outputs from all steps
         all_outputs = self.forward(
             input_ids,
@@ -1008,11 +1005,18 @@ class PlasticNeuralNetworkExp4(nn.Module):
             return_all_steps=True
         )
 
+        # Dynamically set step_weights based on actual number of steps
+        num_refinement_steps = len(all_outputs) - 1  # Exclude embedding
+        if step_weights is None:
+            # Create linearly increasing weights that sum to 1.0
+            total = sum(range(1, num_refinement_steps + 1))
+            step_weights = [i / total for i in range(1, num_refinement_steps + 1)]
+
         total_loss = 0.0
         step_losses = []
         step_accs = [] if return_accuracies else None
 
-        # Skip embedding (step 0), compute loss for refinement steps (1-4)
+        # Skip embedding (step 0), compute loss for refinement steps
         for step_idx, hidden in enumerate(all_outputs[1:], start=0):
             loss, logits = self.get_mlm_loss(hidden, labels)
             weight = step_weights[step_idx]
@@ -1077,6 +1081,7 @@ class PlasticNeuralNetworkExp5(nn.Module):
         self.hidden_size = hidden_size
         self.num_steps = num_steps
         self.use_checkpoint = use_checkpoint
+        self.num_blocks = num_blocks
 
         # Embeddings
         self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
@@ -1176,9 +1181,6 @@ class PlasticNeuralNetworkExp5(nn.Module):
         return_accuracies: bool = False
     ) -> tuple:
         """Compute weighted loss across all refinement steps."""
-        if step_weights is None:
-            step_weights = [0.1, 0.2, 0.3, 0.4]
-
         # Get outputs from all steps
         all_outputs = self.forward(
             input_ids,
@@ -1186,11 +1188,18 @@ class PlasticNeuralNetworkExp5(nn.Module):
             return_all_steps=True
         )
 
+        # Dynamically set step_weights based on actual number of steps
+        num_refinement_steps = len(all_outputs) - 1  # Exclude embedding
+        if step_weights is None:
+            # Create linearly increasing weights that sum to 1.0
+            total = sum(range(1, num_refinement_steps + 1))
+            step_weights = [i / total for i in range(1, num_refinement_steps + 1)]
+
         total_loss = 0.0
         step_losses = []
         step_accs = [] if return_accuracies else None
 
-        # Skip embedding (step 0), compute loss for refinement steps (1-4)
+        # Skip embedding (step 0), compute loss for refinement steps
         for step_idx, hidden in enumerate(all_outputs[1:], start=0):
             loss, logits = self.get_mlm_loss(hidden, labels)
             weight = step_weights[step_idx]
