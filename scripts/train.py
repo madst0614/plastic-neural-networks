@@ -34,13 +34,15 @@ def parse_args():
     
     # Model
     parser.add_argument('--model', type=str, default='pnn',
-                       choices=['pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3', 'pnn_exp4', 'pnn_exp5', 'bert'],
-                       help='Model type: pnn (baseline), pnn_exp1 (dual blocks), pnn_exp2 (dual refiners), pnn_exp3 (big single FFN), pnn_exp4 (3 blocks), pnn_exp5 (8 blocks, BERT-matched ~110M params)')
+                       choices=['pnn', 'pnn_hierarchical', 'bert'],
+                       help='Model type: pnn (baseline), pnn_hierarchical (mountain-shaped FFN with hierarchical refiner)')
     parser.add_argument('--hidden_size', type=int, default=768)
     parser.add_argument('--num_heads', type=int, default=12)
-    parser.add_argument('--intermediate_size', type=int, default=2048,
-                       help='FFN intermediate size (use 3900 for pnn_exp5 to match BERT-base ~110M params)')
-    parser.add_argument('--num_steps', type=int, default=4, help='PNN refinement steps (Exp2 with dual refiners needs 8 for fair comparison)')
+    parser.add_argument('--intermediate_size', type=str, default='2048',
+                       help='FFN intermediate size (int for pnn, comma-separated list for hierarchical e.g., "1024,1536,2048,1536,1024")')
+    parser.add_argument('--num_steps', type=int, default=4, help='PNN refinement steps')
+    parser.add_argument('--num_blocks', type=int, default=5, help='Number of blocks for hierarchical mode')
+    parser.add_argument('--use_checkpoint', action='store_true', help='Use gradient checkpointing for hierarchical mode')
     parser.add_argument('--max_length', type=int, default=128)
     parser.add_argument('--dropout', type=float, default=0.1)
     
@@ -309,15 +311,28 @@ def main():
     
     # Create model
     print(f"\n🤖 Creating {args.model} model...")
+
+    # Parse intermediate_size (can be int or comma-separated list)
+    if ',' in args.intermediate_size:
+        intermediate_size = [int(x.strip()) for x in args.intermediate_size.split(',')]
+    else:
+        intermediate_size = int(args.intermediate_size)
+
     model_config = {
         'vocab_size': tokenizer.vocab_size,
         'hidden_size': args.hidden_size,
         'num_heads': args.num_heads,
-        'intermediate_size': args.intermediate_size,
+        'intermediate_size': intermediate_size,
         'max_length': args.max_length,
         'num_steps': args.num_steps,
         'dropout': args.dropout
     }
+
+    # Add hierarchical-specific config
+    if args.model == 'pnn_hierarchical':
+        model_config['num_blocks'] = args.num_blocks
+        model_config['use_checkpoint'] = args.use_checkpoint
+
     model = create_pnn_model(model_config, model_type=args.model)
     model = model.to(device)
     
@@ -366,12 +381,6 @@ def main():
         print(f"   Train Loss: {train_loss:.4f}")
         print(f"   Step Losses: {[f'{l:.4f}' for l in step_losses]}")
         print(f"   Step Accs:   {[f'{a:.4f}' for a in step_accs]}")
-
-        # For Exp2: show refiner-specific performance
-        if args.model == 'pnn_exp2':
-            print(f"   Refiner1 (steps 0,2): Loss={step_losses[0]:.4f}, {step_losses[2]:.4f} | Acc={step_accs[0]:.4f}, {step_accs[2]:.4f}")
-            print(f"   Refiner2 (steps 1,3): Loss={step_losses[1]:.4f}, {step_losses[3]:.4f} | Acc={step_accs[1]:.4f}, {step_accs[3]:.4f}")
-
         print(f"   Eval Loss:  {eval_loss:.4f}")
         print(f"   Eval Acc:   {eval_acc:.4f} ({eval_acc*100:.2f}%)")
         print(f"   Time: {epoch_time:.1f}s ({epoch_time/60:.1f}m)\n")

@@ -141,6 +141,133 @@ class DeltaRefiner(nn.Module):
         return delta
 
 
+
+
+class DeltaRefinerHierarchical(nn.Module):
+    """
+    Hierarchical Mini-Delta Accumulation with Mountain-shaped FFN
+
+    Each block proposes a mini-delta, accumulated to form final delta.
+    All processing references h_original + accumulated_delta.
+
+    Key features:
+    - Each block generates mini-delta based on h_original + accumulated_delta
+    - Mini-gates for each block's proposal
+    - Final gate on total accumulated delta
+    - Supports per-block intermediate sizes for mountain-shaped capacity
+    - Small initialization (0.02 / sqrt(num_blocks)) for stability
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        num_heads: int = 12,
+        intermediate_size: int | list[int] = 2048,
+        dropout: float = 0.1,
+        num_blocks: int = 8
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_blocks = num_blocks
+
+        # Handle intermediate_size: int or list
+        if isinstance(intermediate_size, int):
+            # Uniform size for all blocks
+            intermediate_sizes = [intermediate_size] * num_blocks
+        else:
+            # Per-block sizes (mountain-shaped)
+            assert len(intermediate_size) == num_blocks, \
+                f"intermediate_size list length ({len(intermediate_size)}) must match num_blocks ({num_blocks})"
+            intermediate_sizes = intermediate_size
+
+        # Create transformer blocks
+        self.blocks = nn.ModuleList()
+        for i in range(num_blocks):
+            block_intermediate_size = intermediate_sizes[i]
+            block = nn.ModuleDict({
+                'attention': nn.MultiheadAttention(
+                    embed_dim=hidden_size,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                    batch_first=True
+                ),
+                'attn_layer_norm': nn.LayerNorm(hidden_size),
+                'attn_dropout': nn.Dropout(dropout),
+                'ffn': nn.Sequential(
+                    nn.Linear(hidden_size, block_intermediate_size),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(block_intermediate_size, hidden_size),
+                    nn.Dropout(dropout)
+                ),
+                'ffn_layer_norm': nn.LayerNorm(hidden_size)
+            })
+
+            # Zero-initialize final FFN layer for stable training
+            nn.init.zeros_(block['ffn'][3].weight)
+            nn.init.zeros_(block['ffn'][3].bias)
+
+            self.blocks.append(block)
+
+        # Mini-gates for each block
+        self.mini_gates = nn.ModuleList([
+            DeltaValidator(hidden_size) for _ in range(num_blocks)
+        ])
+
+        # Final gate for accumulated delta
+        self.final_gate = DeltaValidator(hidden_size)
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        attention_mask: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Compute delta through hierarchical mini-delta accumulation.
+
+        Args:
+            h: Current representation [batch, seq_len, hidden]
+            attention_mask: Attention mask
+
+        Returns:
+            delta: Final gated accumulated delta
+        """
+        h_original = h
+        accumulated_delta = torch.zeros_like(h)
+
+        for i, block in enumerate(self.blocks):
+            # Current state = original + accumulated changes
+            h_with_delta = h_original + accumulated_delta
+
+            # Attention block
+            attn_out, _ = block['attention'](
+                h_with_delta, h_with_delta, h_with_delta,
+                key_padding_mask=attention_mask
+            )
+            h_attn = block['attn_layer_norm'](
+                h_with_delta + block['attn_dropout'](attn_out)
+            )
+
+            # Propose mini-delta
+            mini_delta_proposal = block['ffn'](h_attn)
+            mini_delta_proposal = block['ffn_layer_norm'](mini_delta_proposal)
+
+            # Gate this block's proposal
+            mini_gate = self.mini_gates[i](h_original, mini_delta_proposal)
+            mini_delta = mini_gate * mini_delta_proposal
+
+            # Accumulate
+            accumulated_delta = accumulated_delta + mini_delta
+
+        # Final gate on total accumulated delta
+        final_gate = self.final_gate(h_original, accumulated_delta)
+        final_delta = final_gate * accumulated_delta
+
+        return final_delta
+
+
+
+
 class PlasticNeuralNetwork(nn.Module):
     """
     Plastic Neural Network (PNN)
@@ -344,127 +471,6 @@ class PlasticNeuralNetwork(nn.Module):
 
 
 
-class DeltaRefinerHierarchical(nn.Module):
-    """
-    Hierarchical Mini-Delta Accumulation with Mountain-shaped FFN
-
-    Each block proposes a mini-delta, accumulated to form final delta.
-    All processing references h_original + accumulated_delta.
-
-    Key features:
-    - Each block generates mini-delta based on h_original + accumulated_delta
-    - Mini-gates for each block's proposal
-    - Final gate on total accumulated delta
-    - Supports per-block intermediate sizes for mountain-shaped capacity
-    - Small initialization (0.02 / sqrt(num_blocks)) for stability
-    """
-
-    def __init__(
-        self,
-        hidden_size: int = 768,
-        num_heads: int = 12,
-        intermediate_size: int | list[int] = 2048,
-        dropout: float = 0.1,
-        num_blocks: int = 8
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_blocks = num_blocks
-
-        # Handle intermediate_size: int or list
-        if isinstance(intermediate_size, int):
-            # Uniform size for all blocks
-            intermediate_sizes = [intermediate_size] * num_blocks
-        else:
-            # Per-block sizes (mountain-shaped)
-            assert len(intermediate_size) == num_blocks, \
-                f"intermediate_size list length ({len(intermediate_size)}) must match num_blocks ({num_blocks})"
-            intermediate_sizes = intermediate_size
-
-        # Create transformer blocks
-        self.blocks = nn.ModuleList()
-        for i in range(num_blocks):
-            block_intermediate_size = intermediate_sizes[i]
-            block = nn.ModuleDict({
-                'attention': nn.MultiheadAttention(
-                    embed_dim=hidden_size,
-                    num_heads=num_heads,
-                    dropout=dropout,
-                    batch_first=True
-                ),
-                'attn_layer_norm': nn.LayerNorm(hidden_size),
-                'attn_dropout': nn.Dropout(dropout),
-                'ffn': nn.Sequential(
-                    nn.Linear(hidden_size, block_intermediate_size),
-                    nn.GELU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(block_intermediate_size, hidden_size),
-                    nn.Dropout(dropout)
-                ),
-                'ffn_layer_norm': nn.LayerNorm(hidden_size)
-            })
-
-            # Zero-initialize final FFN layer for stable training
-            nn.init.zeros_(block['ffn'][3].weight)
-            nn.init.zeros_(block['ffn'][3].bias)
-
-            self.blocks.append(block)
-
-        # Mini-gates for each block
-        self.mini_gates = nn.ModuleList([
-            DeltaValidator(hidden_size) for _ in range(num_blocks)
-        ])
-
-        # Final gate for accumulated delta
-        self.final_gate = DeltaValidator(hidden_size)
-
-    def forward(
-        self,
-        h: torch.Tensor,
-        attention_mask: torch.Tensor = None
-    ) -> torch.Tensor:
-        """
-        Compute delta through hierarchical mini-delta accumulation.
-
-        Args:
-            h: Current representation [batch, seq_len, hidden]
-            attention_mask: Attention mask
-
-        Returns:
-            delta: Final gated accumulated delta
-        """
-        h_original = h
-        accumulated_delta = torch.zeros_like(h)
-
-        for i, block in enumerate(self.blocks):
-            # Current state = original + accumulated changes
-            h_with_delta = h_original + accumulated_delta
-
-            # Attention block
-            attn_out, _ = block['attention'](
-                h_with_delta, h_with_delta, h_with_delta,
-                key_padding_mask=attention_mask
-            )
-            h_attn = block['attn_layer_norm'](
-                h_with_delta + block['attn_dropout'](attn_out)
-            )
-
-            # Propose mini-delta
-            mini_delta_proposal = block['ffn'](h_attn)
-            mini_delta_proposal = block['ffn_layer_norm'](mini_delta_proposal)
-
-            # Gate this block's proposal
-            mini_gate = self.mini_gates[i](h_original, mini_delta_proposal)
-            mini_delta = mini_gate * mini_delta_proposal
-
-            # Accumulate
-            accumulated_delta = accumulated_delta + mini_delta
-
-        # Final gate on total accumulated delta
-        final_gate = self.final_gate(h_original, accumulated_delta)
-        final_delta = final_gate * accumulated_delta
-
-        return final_delta
 
 
 def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
