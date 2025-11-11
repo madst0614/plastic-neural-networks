@@ -37,18 +37,18 @@ class DeltaValidator(nn.Module):
         # Learnable temperature for validity scaling
         self.temperature = nn.Parameter(torch.ones(1) * math.sqrt(hidden_size))
 
-    def forward(self, h: torch.Tensor, delta_raw: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, delta_proposal: torch.Tensor) -> torch.Tensor:
         """
         Args:
             h: Current representation [batch, seq_len, hidden]
-            delta_raw: Proposed update [batch, seq_len, hidden]
+            delta_proposal: Proposed update [batch, seq_len, hidden]
 
         Returns:
             validity: Element-wise validity gates [batch, seq_len, hidden]
         """
         # Compute query and key
         query = self.query_proj(h)
-        key = self.key_proj(delta_raw)
+        key = self.key_proj(delta_proposal)
 
         # Element-wise compatibility
         compatibility = query * key
@@ -62,9 +62,16 @@ class DeltaValidator(nn.Module):
 class DeltaRefiner(nn.Module):
     """
     Delta Refinement Module
-    
-    Single module applied recurrently to compute additive updates.
-    Uses self-attention + FFN + adaptive gating.
+
+    Refines representation by computing contextual delta updates.
+
+    Given current state, refines it by:
+    1. Gathering contextual information (attention)
+    2. Computing proposed delta (FFN)
+    3. Selectively applying delta through delta-validator
+
+    The term "refine" captures the progressive improvement
+    through iterative adjustments.
     """
     
     def __init__(
@@ -122,15 +129,15 @@ class DeltaRefiner(nn.Module):
         # Self-attention with residual
         attn_out, _ = self.attention(h, h, h, key_padding_mask=attention_mask)
         h_attn = self.attn_layer_norm(h + self.attn_dropout(attn_out))
-        
-        # Feed-forward to compute raw delta
-        delta_raw = self.ffn(h_attn)
-        delta_raw = self.ffn_layer_norm(delta_raw)
-        
+
+        # Feed-forward to compute proposed delta
+        delta_proposal = self.ffn(h_attn)
+        delta_proposal = self.ffn_layer_norm(delta_proposal)
+
         # Apply adaptive gating
-        gate = self.gate(h, delta_raw)
-        delta = gate * delta_raw
-        
+        gate = self.gate(h, delta_proposal)
+        delta = gate * delta_proposal
+
         return delta
 
 
@@ -407,12 +414,12 @@ class DeltaRefinerHierarchical(nn.Module):
             )
 
             # Propose mini-delta
-            mini_delta_raw = block['ffn'](h_attn)
-            mini_delta_raw = block['ffn_layer_norm'](mini_delta_raw)
+            mini_delta_proposal = block['ffn'](h_attn)
+            mini_delta_proposal = block['ffn_layer_norm'](mini_delta_proposal)
 
             # Gate this block's proposal
-            mini_gate = self.mini_gates[i](h_original, mini_delta_raw)
-            mini_delta = mini_gate * mini_delta_raw
+            mini_gate = self.mini_gates[i](h_original, mini_delta_proposal)
+            mini_delta = mini_gate * mini_delta_proposal
 
             # Accumulate
             accumulated_delta = accumulated_delta + mini_delta
