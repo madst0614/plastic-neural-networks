@@ -144,39 +144,59 @@ class DeltaRefiner(nn.Module):
 class PlasticNeuralNetwork(nn.Module):
     """
     Plastic Neural Network (PNN)
-    
+
     Learns through iterative delta refinement rather than deep layer stacks.
-    Applies a single DeltaRefiner module recurrently.
+    Supports both single-block (DeltaRefiner) and hierarchical (DeltaRefinerHierarchical)
+    refinement strategies.
     """
-    
+
     def __init__(
         self,
         vocab_size: int = 30522,
         hidden_size: int = 768,
         num_heads: int = 12,
-        intermediate_size: int = 2048,
+        intermediate_size: int | list[int] = 2048,
         max_length: int = 128,
         num_steps: int = 4,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        use_hierarchical: bool = False,
+        num_blocks: int = 5,
+        use_checkpoint: bool = False
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_steps = num_steps
-        
+        self.use_hierarchical = use_hierarchical
+        self.use_checkpoint = use_checkpoint
+
         # Embeddings
         self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
         self.position_embeddings = nn.Embedding(max_length, hidden_size)
         self.embedding_layer_norm = nn.LayerNorm(hidden_size)
         self.embedding_dropout = nn.Dropout(dropout)
-        
-        # Single delta refiner (shared across steps)
-        self.delta_refiner = DeltaRefiner(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            intermediate_size=intermediate_size,
-            dropout=dropout
-        )
+
+        # Delta refiner (shared across steps)
+        if use_hierarchical:
+            # Hierarchical refiner with multiple blocks
+            self.delta_refiner = DeltaRefinerHierarchical(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                intermediate_size=intermediate_size,
+                dropout=dropout,
+                num_blocks=num_blocks
+            )
+        else:
+            # Single-block refiner
+            # intermediate_size must be int for single-block
+            if isinstance(intermediate_size, list):
+                raise ValueError("intermediate_size must be int for non-hierarchical mode")
+            self.delta_refiner = DeltaRefiner(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                intermediate_size=intermediate_size,
+                dropout=dropout
+            )
         
         # MLM head
         self.mlm_head = nn.Linear(hidden_size, vocab_size)
@@ -240,9 +260,13 @@ class PlasticNeuralNetwork(nn.Module):
         
         # Recurrent refinement
         for step in range(self.num_steps):
-            delta = self.delta_refiner(hidden, attn_mask)
+            # Use gradient checkpointing if enabled (only for hierarchical)
+            if self.use_checkpoint and self.use_hierarchical and self.training:
+                delta = checkpoint(self.delta_refiner, hidden, attn_mask, use_reentrant=False)
+            else:
+                delta = self.delta_refiner(hidden, attn_mask)
             hidden = hidden + delta
-            
+
             if return_all_steps:
                 all_outputs.append(hidden)
         
@@ -322,7 +346,7 @@ class PlasticNeuralNetwork(nn.Module):
 
 class DeltaRefinerHierarchical(nn.Module):
     """
-    Hierarchical Mini-Delta Accumulation
+    Hierarchical Mini-Delta Accumulation with Mountain-shaped FFN
 
     Each block proposes a mini-delta, accumulated to form final delta.
     All processing references h_original + accumulated_delta.
@@ -331,6 +355,7 @@ class DeltaRefinerHierarchical(nn.Module):
     - Each block generates mini-delta based on h_original + accumulated_delta
     - Mini-gates for each block's proposal
     - Final gate on total accumulated delta
+    - Supports per-block intermediate sizes for mountain-shaped capacity
     - Small initialization (0.02 / sqrt(num_blocks)) for stability
     """
 
@@ -338,7 +363,7 @@ class DeltaRefinerHierarchical(nn.Module):
         self,
         hidden_size: int = 768,
         num_heads: int = 12,
-        intermediate_size: int = 2048,
+        intermediate_size: int | list[int] = 2048,
         dropout: float = 0.1,
         num_blocks: int = 8
     ):
@@ -346,9 +371,20 @@ class DeltaRefinerHierarchical(nn.Module):
         self.hidden_size = hidden_size
         self.num_blocks = num_blocks
 
+        # Handle intermediate_size: int or list
+        if isinstance(intermediate_size, int):
+            # Uniform size for all blocks
+            intermediate_sizes = [intermediate_size] * num_blocks
+        else:
+            # Per-block sizes (mountain-shaped)
+            assert len(intermediate_size) == num_blocks, \
+                f"intermediate_size list length ({len(intermediate_size)}) must match num_blocks ({num_blocks})"
+            intermediate_sizes = intermediate_size
+
         # Create transformer blocks
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
+            block_intermediate_size = intermediate_sizes[i]
             block = nn.ModuleDict({
                 'attention': nn.MultiheadAttention(
                     embed_dim=hidden_size,
@@ -359,10 +395,10 @@ class DeltaRefinerHierarchical(nn.Module):
                 'attn_layer_norm': nn.LayerNorm(hidden_size),
                 'attn_dropout': nn.Dropout(dropout),
                 'ffn': nn.Sequential(
-                    nn.Linear(hidden_size, intermediate_size),
+                    nn.Linear(hidden_size, block_intermediate_size),
                     nn.GELU(),
                     nn.Dropout(dropout),
-                    nn.Linear(intermediate_size, hidden_size),
+                    nn.Linear(block_intermediate_size, hidden_size),
                     nn.Dropout(dropout)
                 ),
                 'ffn_layer_norm': nn.LayerNorm(hidden_size)
@@ -431,9 +467,6 @@ class DeltaRefinerHierarchical(nn.Module):
         return final_delta
 
 
-
-
-
 def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
     """
     Factory function to create PNN model with config.
@@ -460,8 +493,18 @@ def create_pnn_model(config: dict = None, model_type: str = 'pnn') -> nn.Module:
     # Create model based on type
     if model_type == 'pnn':
         model = PlasticNeuralNetwork(**config)
+    elif model_type == 'pnn_hierarchical':
+        # Hierarchical variant with mountain-shaped FFN
+        hierarchical_config = config.copy()
+        hierarchical_config['use_hierarchical'] = True
+        # Default mountain shape: [1024, 1536, 2048, 1536, 1024]
+        if 'intermediate_size' not in hierarchical_config or isinstance(hierarchical_config.get('intermediate_size'), int):
+            hierarchical_config['intermediate_size'] = [1024, 1536, 2048, 1536, 1024]
+        if 'num_blocks' not in hierarchical_config:
+            hierarchical_config['num_blocks'] = 5
+        model = PlasticNeuralNetwork(**hierarchical_config)
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn'")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from 'pnn', 'pnn_hierarchical'")
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Created {model_type.upper()} with {total_params:,} parameters ({total_params/1e6:.1f}M)")
