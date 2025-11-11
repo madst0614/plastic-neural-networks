@@ -431,42 +431,63 @@ class PlasticNeuralNetwork(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
-        step_weights: list = None
+        step_weights: list = None,
+        return_accuracies: bool = False
     ) -> tuple:
         """
         Compute weighted loss across all refinement steps.
-        
+
         Args:
             input_ids: Token IDs [batch, seq_len]
             attention_mask: Attention mask [batch, seq_len]
             labels: Target labels [batch, seq_len]
             step_weights: Weights for each step (default: [0.1, 0.2, 0.3, 0.4])
-            
+            return_accuracies: If True, also return step-wise accuracies
+
         Returns:
             total_loss: Weighted sum of step losses
             step_losses: Individual losses per step
+            step_accs: (optional) Individual accuracies per step
         """
         if step_weights is None:
             step_weights = [0.1, 0.2, 0.3, 0.4]
-        
+
         # Get outputs from all steps
         all_outputs = self.forward(
-            input_ids, 
-            attention_mask, 
+            input_ids,
+            attention_mask,
             return_all_steps=True
         )
-        
+
         total_loss = 0.0
         step_losses = []
-        
+        step_accs = [] if return_accuracies else None
+
         # Skip embedding (step 0), compute loss for refinement steps (1-4)
         for step_idx, hidden in enumerate(all_outputs[1:], start=0):
-            loss, _ = self.get_mlm_loss(hidden, labels)
+            loss, logits = self.get_mlm_loss(hidden, labels)
             weight = step_weights[step_idx]
             total_loss += weight * loss
             step_losses.append(loss.item())
-        
-        return total_loss, step_losses
+
+            if return_accuracies:
+                # Calculate accuracy for this step
+                with torch.no_grad():
+                    preds = logits.detach().argmax(dim=-1).view(-1)  # [B*L]
+                    labels_flat = labels.view(-1)  # [B*L]
+                    mask = (labels_flat != -100)  # [B*L]
+                    correct = ((preds == labels_flat) & mask).sum().item()
+                    total_tokens = mask.sum().item()
+                    acc = correct / total_tokens if total_tokens > 0 else 0.0
+                    step_accs.append(acc)
+
+            # Delete logits immediately to free memory
+            del logits
+
+        if return_accuracies:
+            return total_loss, step_losses, step_accs
+        else:
+            return total_loss, step_losses
 
 
 
