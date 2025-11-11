@@ -33,11 +33,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train Plastic Neural Networks')
     
     # Model
-    parser.add_argument('--model', type=str, default='pnn', choices=['pnn', 'bert'])
+    parser.add_argument('--model', type=str, default='pnn',
+                       choices=['pnn', 'pnn_exp1', 'pnn_exp2', 'pnn_exp3', 'pnn_exp4', 'pnn_exp5', 'bert'],
+                       help='Model type: pnn (baseline), pnn_exp1 (dual blocks), pnn_exp2 (dual refiners), pnn_exp3 (big single FFN), pnn_exp4 (3 blocks), pnn_exp5 (8 blocks, BERT-matched ~110M params)')
     parser.add_argument('--hidden_size', type=int, default=768)
     parser.add_argument('--num_heads', type=int, default=12)
-    parser.add_argument('--intermediate_size', type=int, default=2048)
-    parser.add_argument('--num_steps', type=int, default=4, help='PNN refinement steps')
+    parser.add_argument('--intermediate_size', type=int, default=2048,
+                       help='FFN intermediate size (use 3900 for pnn_exp5 to match BERT-base ~110M params)')
+    parser.add_argument('--num_steps', type=int, default=4, help='PNN refinement steps (Exp2 with dual refiners needs 8 for fair comparison)')
     parser.add_argument('--max_length', type=int, default=128)
     parser.add_argument('--dropout', type=float, default=0.1)
     
@@ -47,7 +50,8 @@ def parse_args():
     parser.add_argument('--gradient_accumulation', type=int, default=3)
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--warmup_steps', type=int, default=500)
+    parser.add_argument('--warmup_steps', type=int, default=100,
+                       help='Warmup steps (in optimizer steps, not batches)')
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--max_samples', type=int, default=1000000)
     
@@ -177,11 +181,12 @@ def evaluate(model, dataloader, device, use_amp=True):
                 loss, logits = model.get_mlm_loss(hidden, labels)
             
             total_loss += loss.item()
-            
+
             # Calculate accuracy
-            preds = logits.argmax(dim=-1)
-            mask = (labels != -100)
-            correct = (preds == labels) & mask
+            preds = logits.argmax(dim=-1).view(-1)  # [B*L]
+            labels_flat = labels.view(-1)  # [B*L]
+            mask = (labels_flat != -100)  # [B*L]
+            correct = (preds == labels_flat) & mask  # [B*L]
             total_correct += correct.sum().item()
             total_tokens += mask.sum().item()
     
@@ -192,10 +197,10 @@ def evaluate(model, dataloader, device, use_amp=True):
 
 
 def train_epoch(
-    model, 
-    dataloader, 
-    optimizer, 
-    scheduler, 
+    model,
+    dataloader,
+    optimizer,
+    scheduler,
     scaler,
     device,
     epoch,
@@ -203,38 +208,47 @@ def train_epoch(
 ):
     """Train for one epoch"""
     model.train()
-    
+
     total_loss = 0.0
     step_losses = [0.0] * args.num_steps
-    
-    progress = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
-    
+    step_accs = [0.0] * args.num_steps
+
+    progress = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}", mininterval=1.0)
+
     for batch_idx, batch in enumerate(progress):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
-        
+
         # Forward pass
         if args.use_amp:
             with autocast(device_type='cuda', dtype=torch.float16):
-                loss, batch_step_losses = model.compute_recurrent_loss(
-                    input_ids, attention_mask, labels
+                result = model.compute_recurrent_loss(
+                    input_ids, attention_mask, labels,
+                    return_accuracies=True
                 )
-                loss = loss / args.gradient_accumulation
-            
+                loss = result[0] / args.gradient_accumulation
+                batch_step_losses = result[1]
+                batch_step_accs = result[2]
+
             scaler.scale(loss).backward()
         else:
-            loss, batch_step_losses = model.compute_recurrent_loss(
-                input_ids, attention_mask, labels
+            result = model.compute_recurrent_loss(
+                input_ids, attention_mask, labels,
+                return_accuracies=True
             )
-            loss = loss / args.gradient_accumulation
+            loss = result[0] / args.gradient_accumulation
+            batch_step_losses = result[1]
+            batch_step_accs = result[2]
             loss.backward()
-        
-        # Accumulate losses
+
+        # Accumulate losses and accuracies
         total_loss += loss.item() * args.gradient_accumulation
         for i, sl in enumerate(batch_step_losses):
             step_losses[i] += sl
-        
+        for i, sa in enumerate(batch_step_accs):
+            step_accs[i] += sa
+
         # Optimizer step
         if (batch_idx + 1) % args.gradient_accumulation == 0:
             if args.use_amp:
@@ -245,21 +259,25 @@ def train_epoch(
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
-            
+
             optimizer.zero_grad()
             scheduler.step()
-        
-        # Update progress
+
+        # Update progress bar with all step info
+        losses_str = ','.join([f'{l:.4f}' for l in batch_step_losses])
+        accs_str = ','.join([f'{a:.4f}' for a in batch_step_accs])
         progress.set_postfix({
-            'loss': f'{loss.item() * args.gradient_accumulation:.4f}',
+            'L': f'[{losses_str}]',
+            'A': f'[{accs_str}]',
             'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
         })
-    
-    # Average losses
+
+    # Average losses and accuracies
     avg_loss = total_loss / len(dataloader)
     avg_step_losses = [sl / len(dataloader) for sl in step_losses]
-    
-    return avg_loss, avg_step_losses
+    avg_step_accs = [sa / len(dataloader) for sa in step_accs]
+
+    return avg_loss, avg_step_losses, avg_step_accs
 
 
 def main():
@@ -300,7 +318,7 @@ def main():
         'num_steps': args.num_steps,
         'dropout': args.dropout
     }
-    model = create_pnn_model(model_config)
+    model = create_pnn_model(model_config, model_type=args.model)
     model = model.to(device)
     
     # Create optimizer and scheduler
@@ -332,21 +350,28 @@ def main():
         epoch_start = time.time()
         
         # Train
-        train_loss, step_losses = train_epoch(
+        train_loss, step_losses, step_accs = train_epoch(
             model, train_loader, optimizer, scheduler, scaler,
             device, epoch, args
         )
-        
+
         # Evaluate
         print("   Evaluating...")
         eval_loss, eval_acc = evaluate(model, eval_loader, device, args.use_amp)
-        
+
         epoch_time = time.time() - epoch_start
-        
+
         # Log results
         print(f"\n   Epoch {epoch+1}/{args.epochs}:")
         print(f"   Train Loss: {train_loss:.4f}")
         print(f"   Step Losses: {[f'{l:.4f}' for l in step_losses]}")
+        print(f"   Step Accs:   {[f'{a:.4f}' for a in step_accs]}")
+
+        # For Exp2: show refiner-specific performance
+        if args.model == 'pnn_exp2':
+            print(f"   Refiner1 (steps 0,2): Loss={step_losses[0]:.4f}, {step_losses[2]:.4f} | Acc={step_accs[0]:.4f}, {step_accs[2]:.4f}")
+            print(f"   Refiner2 (steps 1,3): Loss={step_losses[1]:.4f}, {step_losses[3]:.4f} | Acc={step_accs[1]:.4f}, {step_accs[3]:.4f}")
+
         print(f"   Eval Loss:  {eval_loss:.4f}")
         print(f"   Eval Acc:   {eval_acc:.4f} ({eval_acc*100:.2f}%)")
         print(f"   Time: {epoch_time:.1f}s ({epoch_time/60:.1f}m)\n")
