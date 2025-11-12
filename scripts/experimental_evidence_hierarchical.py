@@ -187,6 +187,7 @@ class BlockContributionAnalyzer:
     ) -> Dict:
         """
         각 block을 제거했을 때 성능 변화 측정
+        mini_gate를 0으로 만들어서 block 기여도 제거
         """
         results = {
             'baseline': {'loss': 0.0, 'accuracy': 0.0},
@@ -202,16 +203,19 @@ class BlockContributionAnalyzer:
         for block_idx in range(self.num_blocks):
             print(f"  Ablating block {block_idx}...")
 
-            # Block 비활성화
-            original_block = self.model.delta_refiner.blocks[block_idx]
-            self.model.delta_refiner.blocks[block_idx] = nn.Identity()
+            # mini_gate를 비활성화 (항상 0 출력)
+            # Hook을 사용해서 gate 출력을 0으로 변경
+            def zero_gate_hook(module, input, output):
+                return torch.zeros_like(output)
+
+            handle = self.model.delta_refiner.mini_gates[block_idx].register_forward_hook(zero_gate_hook)
 
             # 평가
             ablation_metrics = self._evaluate(dataloader, num_batches)
             results['ablations'][f'block_{block_idx}'] = ablation_metrics
 
-            # 복구
-            self.model.delta_refiner.blocks[block_idx] = original_block
+            # Hook 제거 (복구)
+            handle.remove()
 
         # 기여도 계산 (baseline - ablation)
         results['contributions'] = {}
@@ -307,9 +311,8 @@ class GateSpecificityAnalyzer:
 
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
 
-                _ = self.model(input_ids, attention_mask, labels)
+                _ = self.model(input_ids, attention_mask)
 
         # Hook 제거
         for handle in handles:
