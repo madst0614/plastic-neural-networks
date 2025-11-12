@@ -3,7 +3,7 @@ Check parameter distribution of PNN models
 """
 import torch
 import torch.nn as nn
-from pnn.models.pnn import PlasticNeuralNetwork, PlasticNeuralNetworkExp1, PlasticNeuralNetworkExp2
+from pnn.models.pnn import PlasticNeuralNetwork
 
 def count_parameters(model, name="Model"):
     """Count parameters by component"""
@@ -69,19 +69,8 @@ if __name__ == "__main__":
     model_pnn = PlasticNeuralNetwork()
     total_pnn = count_parameters(model_pnn, "Baseline PNN")
 
-    # Exp1 (Expanded FFN)
-    model_exp1 = PlasticNeuralNetworkExp1()
-    total_exp1 = count_parameters(model_exp1, "Exp1: Expanded FFN")
-
-    # Exp2 (Dual Refiners)
-    model_exp2 = PlasticNeuralNetworkExp2()
-    total_exp2 = count_parameters(model_exp2, "Exp2: Dual Refiners")
-
-    # Comparison
     print(f"\n{'='*60}")
-    print("Comparison")
+    print("Summary")
     print(f"{'='*60}")
-    print(f"Baseline:            {total_pnn:>12,} ({total_pnn/1e6:>6.2f}M)")
-    print(f"Exp1 (FFN 2x):       {total_exp1:>12,} ({total_exp1/1e6:>6.2f}M)  [+{(total_exp1-total_pnn)/1e6:>5.2f}M, {total_exp1/total_pnn:.2%}]")
-    print(f"Exp2 (Dual Refiner): {total_exp2:>12,} ({total_exp2/1e6:>6.2f}M)  [+{(total_exp2-total_pnn)/1e6:>5.2f}M, {total_exp2/total_pnn:.2%}]")
+    print(f"PlasticNeuralNetwork: {total_pnn:>12,} ({total_pnn/1e6:>6.2f}M)")
     print(f"{'='*60}\n")
