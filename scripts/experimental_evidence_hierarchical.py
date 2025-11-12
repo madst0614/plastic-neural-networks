@@ -696,86 +696,362 @@ def visualize_results(results: Dict, output_dir: Path):
     """결과 시각화"""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Block activities over steps
+    # 1. MEG Analysis - Block activities over steps
     if 'meg_analysis' in results:
         meg_data = results['meg_analysis']
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('MEG Simulation: Hierarchical Block Activity Patterns', fontsize=16)
+
+        # Block activities
         if 'mean_block_activities' in meg_data:
             activities = meg_data['mean_block_activities']  # [steps, blocks]
-
-            plt.figure(figsize=(10, 6))
+            ax = axes[0, 0]
             for block_idx in range(activities.shape[1]):
-                plt.plot(activities[:, block_idx], marker='o', label=f'Block {block_idx}')
-            plt.xlabel('Refinement Step')
-            plt.ylabel('Activity Magnitude')
-            plt.title('Block Activities Across Refinement Steps')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.savefig(output_dir / 'block_activities.png', dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"  💾 Saved: {output_dir / 'block_activities.png'}")
+                ax.plot(activities[:, block_idx], marker='o', label=f'Block {block_idx}', linewidth=2)
+            ax.set_xlabel('Refinement Step')
+            ax.set_ylabel('Activity Magnitude')
+            ax.set_title('Block FFN Activity Across Steps')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
 
-    # 2. Block contributions (ablation study)
+        # Gate values
+        if 'mean_gate_values' in meg_data:
+            gates = meg_data['mean_gate_values']  # [steps, blocks]
+            ax = axes[0, 1]
+            for block_idx in range(gates.shape[1]):
+                ax.plot(gates[:, block_idx], marker='s', label=f'Gate {block_idx}', linewidth=2)
+            ax.set_xlabel('Refinement Step')
+            ax.set_ylabel('Gate Value')
+            ax.set_title('Mini-Gate Values Across Steps')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        # Average activity per step
+        if 'mean_block_activities' in meg_data:
+            activities = meg_data['mean_block_activities']
+            ax = axes[1, 0]
+            step_avg = activities.mean(axis=1)  # Average across blocks
+            ax.plot(step_avg, marker='o', linewidth=2, color='purple')
+            ax.fill_between(range(len(step_avg)), step_avg, alpha=0.3, color='purple')
+            ax.set_xlabel('Refinement Step')
+            ax.set_ylabel('Average Activity')
+            ax.set_title('Overall Activity Magnitude')
+            ax.grid(True, alpha=0.3)
+
+        # Block-wise variance
+        if 'mean_block_activities' in meg_data:
+            activities = meg_data['mean_block_activities']
+            ax = axes[1, 1]
+            block_variance = activities.var(axis=0)  # Variance over steps for each block
+            ax.bar(range(len(block_variance)), block_variance, color=plt.cm.viridis(np.linspace(0.3, 0.9, len(block_variance))))
+            ax.set_xlabel('Block Index')
+            ax.set_ylabel('Activity Variance')
+            ax.set_title('Block Activity Variance (Stability)')
+            ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'meg_temporal_patterns.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✅ Saved: {output_dir / 'meg_temporal_patterns.png'}")
+
+    # 2. Block Contribution (Ablation Study)
     if 'block_analysis' in results:
         block_data = results['block_analysis']
         if 'contributions' in block_data:
             contributions = block_data['contributions']
 
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+            fig.suptitle('Block Importance Analysis (Ablation Study)', fontsize=16)
+
             block_names = list(contributions.keys())
-            acc_decreases = [contributions[b]['accuracy_decrease'] for b in block_names]
+            acc_decreases = [contributions[b]['accuracy_decrease'] * 100 for b in block_names]
+            loss_increases = [contributions[b]['loss_increase'] for b in block_names]
 
-            plt.figure(figsize=(10, 6))
-            bars = plt.bar(range(len(block_names)), acc_decreases)
-
-            # Color bars - mountain pattern
+            # Accuracy impact
+            bars = ax1.bar(range(len(block_names)), acc_decreases)
             colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(block_names)))
             for bar, color in zip(bars, colors):
                 bar.set_color(color)
+            ax1.set_xlabel('Block')
+            ax1.set_ylabel('Accuracy Decrease (%)')
+            ax1.set_title('Accuracy Impact When Ablated')
+            ax1.set_xticks(range(len(block_names)))
+            ax1.set_xticklabels([f'B{i}' for i in range(len(block_names))], rotation=0)
+            ax1.grid(True, alpha=0.3, axis='y')
 
-            plt.xlabel('Block')
-            plt.ylabel('Accuracy Decrease (when ablated)')
-            plt.title('Block Importance (Higher = More Important)')
-            plt.xticks(range(len(block_names)), block_names, rotation=45)
-            plt.grid(True, alpha=0.3, axis='y')
-            plt.savefig(output_dir / 'block_contributions.png', dpi=150, bbox_inches='tight')
+            # Add values on bars
+            for i, v in enumerate(acc_decreases):
+                ax1.text(i, v + 0.1, f'{v:.1f}%', ha='center', va='bottom', fontsize=9)
+
+            # Loss impact
+            bars = ax2.bar(range(len(block_names)), loss_increases, color='coral')
+            ax2.set_xlabel('Block')
+            ax2.set_ylabel('Loss Increase')
+            ax2.set_title('Loss Impact When Ablated')
+            ax2.set_xticks(range(len(block_names)))
+            ax2.set_xticklabels([f'B{i}' for i in range(len(block_names))], rotation=0)
+            ax2.grid(True, alpha=0.3, axis='y')
+
+            plt.tight_layout()
+            plt.savefig(output_dir / 'block_contributions.png', dpi=300, bbox_inches='tight')
             plt.close()
-            print(f"  💾 Saved: {output_dir / 'block_contributions.png'}")
+            print(f"  ✅ Saved: {output_dir / 'block_contributions.png'}")
 
-    # 3. Gate statistics
+    # 3. Gate Analysis
     if 'gate_analysis' in results:
         gate_data = results['gate_analysis']
         if 'gate_statistics' in gate_data:
-            stats = gate_data['gate_statistics']
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            fig.suptitle('Mini-Gate Analysis', fontsize=16)
 
+            stats = gate_data['gate_statistics']
             gate_names = list(stats.keys())
             means = [stats[g]['mean'] for g in gate_names]
             stds = [stats[g]['std'] for g in gate_names]
 
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
             # Mean values
-            ax1.bar(range(len(gate_names)), means, color='skyblue')
-            ax1.set_xlabel('Gate')
-            ax1.set_ylabel('Mean Gate Value')
-            ax1.set_title('Average Gate Activation')
-            ax1.set_xticks(range(len(gate_names)))
-            ax1.set_xticklabels(gate_names, rotation=45)
-            ax1.grid(True, alpha=0.3, axis='y')
+            ax = axes[0, 0]
+            ax.bar(range(len(gate_names)), means, color='skyblue')
+            ax.set_xlabel('Gate')
+            ax.set_ylabel('Mean Gate Value')
+            ax.set_title('Average Gate Activation')
+            ax.set_xticks(range(len(gate_names)))
+            ax.set_xticklabels([f'G{i}' for i in range(len(gate_names))], rotation=0)
+            ax.grid(True, alpha=0.3, axis='y')
 
             # Entropy
+            ax = axes[0, 1]
             if 'gate_entropy' in gate_data:
                 entropies = [gate_data['gate_entropy'][g] for g in gate_names]
-                ax2.bar(range(len(gate_names)), entropies, color='coral')
-                ax2.set_xlabel('Gate')
-                ax2.set_ylabel('Entropy')
-                ax2.set_title('Gate Selectivity (Lower = More Selective)')
-                ax2.set_xticks(range(len(gate_names)))
-                ax2.set_xticklabels(gate_names, rotation=45)
-                ax2.grid(True, alpha=0.3, axis='y')
+                ax.bar(range(len(gate_names)), entropies, color='coral')
+                ax.set_xlabel('Gate')
+                ax.set_ylabel('Entropy')
+                ax.set_title('Gate Selectivity (Lower = More Selective)')
+                ax.set_xticks(range(len(gate_names)))
+                ax.set_xticklabels([f'G{i}' for i in range(len(gate_names))], rotation=0)
+                ax.grid(True, alpha=0.3, axis='y')
+
+            # Sparsity
+            ax = axes[1, 0]
+            if 'gate_sparsity' in gate_data:
+                sparsities = [gate_data['gate_sparsity'][g] * 100 for g in gate_names]
+                ax.bar(range(len(gate_names)), sparsities, color='lightgreen')
+                ax.set_xlabel('Gate')
+                ax.set_ylabel('Sparsity (%)')
+                ax.set_title('Gate Sparsity (dims < 0.1)')
+                ax.set_xticks(range(len(gate_names)))
+                ax.set_xticklabels([f'G{i}' for i in range(len(gate_names))], rotation=0)
+                ax.grid(True, alpha=0.3, axis='y')
+
+            # Mean vs Std scatter
+            ax = axes[1, 1]
+            ax.scatter(means, stds, s=100, alpha=0.6, c=range(len(gate_names)), cmap='viridis')
+            for i, name in enumerate(gate_names):
+                ax.annotate(f'G{i}', (means[i], stds[i]), fontsize=9, ha='right')
+            ax.set_xlabel('Mean Gate Value')
+            ax.set_ylabel('Std Gate Value')
+            ax.set_title('Gate Mean vs Variability')
+            ax.grid(True, alpha=0.3)
 
             plt.tight_layout()
-            plt.savefig(output_dir / 'gate_analysis.png', dpi=150, bbox_inches='tight')
+            plt.savefig(output_dir / 'gate_analysis.png', dpi=300, bbox_inches='tight')
             plt.close()
-            print(f"  💾 Saved: {output_dir / 'gate_analysis.png'}")
+            print(f"  ✅ Saved: {output_dir / 'gate_analysis.png'}")
+
+    # 4. Optogenetics - Suppression Effects
+    if 'optogenetics' in results:
+        opto = results['optogenetics']
+        baseline_loss = opto['baseline']['loss']
+        baseline_acc = opto['baseline']['accuracy'] * 100
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle('Optogenetics Simulation: Block Suppression Effects', fontsize=16)
+
+        rates = [0, 25, 50, 75, 100]
+        num_blocks = 0
+
+        # Determine number of blocks
+        for key in opto.keys():
+            if key.startswith('block_'):
+                block_idx = int(key.split('_')[1])
+                num_blocks = max(num_blocks, block_idx + 1)
+
+        # Loss plot
+        ax = axes[0]
+        for block_idx in range(num_blocks):
+            losses = []
+            for rate in rates:
+                if rate == 0:
+                    key = 'baseline'
+                else:
+                    key = f'block_{block_idx}_suppressed_{rate}'
+                if key in opto:
+                    losses.append(opto[key]['loss'])
+            if losses:
+                ax.plot(rates, losses, marker='o', label=f'Block {block_idx}', linewidth=2)
+
+        ax.set_xlabel('Suppression Rate (%)')
+        ax.set_ylabel('Loss')
+        ax.set_title('Loss vs Suppression Rate')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Accuracy plot
+        ax = axes[1]
+        for block_idx in range(num_blocks):
+            accs = []
+            for rate in rates:
+                if rate == 0:
+                    key = 'baseline'
+                else:
+                    key = f'block_{block_idx}_suppressed_{rate}'
+                if key in opto:
+                    accs.append(opto[key]['accuracy'] * 100)
+            if accs:
+                ax.plot(rates, accs, marker='o', label=f'Block {block_idx}', linewidth=2)
+
+        ax.set_xlabel('Suppression Rate (%)')
+        ax.set_ylabel('Accuracy (%)')
+        ax.set_title('Accuracy vs Suppression Rate')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'optogenetics_suppression.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✅ Saved: {output_dir / 'optogenetics_suppression.png'}")
+
+    # 5. Dimensionwise Analysis
+    if 'dimensionwise' in results:
+        dim_data = results['dimensionwise']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle('Dimensionwise Gate Analysis', fontsize=16)
+
+        # Active ratios
+        ax = axes[0]
+        if 'per_dimension_stats' in dim_data:
+            gate_names = list(dim_data['per_dimension_stats'].keys())
+            active_ratios = [dim_data['per_dimension_stats'][g]['active_ratio'] * 100 for g in gate_names]
+
+            bars = ax.bar(range(len(gate_names)), active_ratios, color=plt.cm.viridis(np.linspace(0.3, 0.9, len(gate_names))))
+            ax.set_xlabel('Gate')
+            ax.set_ylabel('Active Dimensions (%)')
+            ax.set_title('Percentage of Active Dimensions (> 0.5)')
+            ax.set_xticks(range(len(gate_names)))
+            ax.set_xticklabels([f'G{i}' for i in range(len(gate_names))], rotation=0)
+            ax.grid(True, alpha=0.3, axis='y')
+
+            for i, v in enumerate(active_ratios):
+                ax.text(i, v + 1, f'{v:.1f}%', ha='center', va='bottom', fontsize=9)
+
+        # Top dimensions heatmap
+        ax = axes[1]
+        if 'top_dimensions' in dim_data:
+            gate_names = list(dim_data['top_dimensions'].keys())
+            top_dims_data = []
+            for g in gate_names:
+                top_dims_data.append(dim_data['top_dimensions'][g][:5])  # Top 5
+
+            ax.set_title('Top 5 Activated Dimensions per Gate')
+            ax.set_xlabel('Rank')
+            ax.set_ylabel('Gate')
+            ax.set_yticks(range(len(gate_names)))
+            ax.set_yticklabels([f'G{i}' for i in range(len(gate_names))])
+
+            # Display as table
+            ax.axis('tight')
+            ax.axis('off')
+            table_data = [[f'G{i}'] + [str(d) for d in dims] for i, dims in enumerate(top_dims_data)]
+            table = ax.table(cellText=table_data, colLabels=['Gate', '1st', '2nd', '3rd', '4th', '5th'],
+                           cellLoc='center', loc='center')
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            table.scale(1, 1.5)
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'dimensionwise_patterns.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✅ Saved: {output_dir / 'dimensionwise_patterns.png'}")
+
+    # 6. Token Difficulty Analysis
+    if 'difficulty' in results:
+        diff_data = results['difficulty']
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle('Token Difficulty Analysis', fontsize=16)
+
+        categories = ['easy', 'medium', 'hard', 'very_hard']
+        colors_diff = ['#66b3ff', '#99ccff', '#ffcc99', '#ff9999']
+
+        # Loss by difficulty
+        ax = axes[0]
+        losses = [diff_data[cat]['avg_loss'] for cat in categories if cat in diff_data]
+        bars = ax.bar(range(len(losses)), losses, color=colors_diff[:len(losses)])
+        ax.set_xlabel('Difficulty')
+        ax.set_ylabel('Average Loss')
+        ax.set_title('Loss by Token Difficulty')
+        ax.set_xticks(range(len(categories)))
+        ax.set_xticklabels([c.capitalize() for c in categories], rotation=0)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        for i, v in enumerate(losses):
+            ax.text(i, v + 0.05, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+
+        # Accuracy by difficulty
+        ax = axes[1]
+        accs = [diff_data[cat]['accuracy'] * 100 for cat in categories if cat in diff_data]
+        bars = ax.bar(range(len(accs)), accs, color=colors_diff[:len(accs)])
+        ax.set_xlabel('Difficulty')
+        ax.set_ylabel('Accuracy (%)')
+        ax.set_title('Accuracy by Token Difficulty')
+        ax.set_xticks(range(len(categories)))
+        ax.set_xticklabels([c.capitalize() for c in categories], rotation=0)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        for i, v in enumerate(accs):
+            ax.text(i, v + 1, f'{v:.1f}%', ha='center', va='bottom', fontsize=9)
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'token_difficulty_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✅ Saved: {output_dir / 'token_difficulty_analysis.png'}")
+
+    # 7. Cross-Token Interference
+    if 'cross_token' in results:
+        interference_data = results['cross_token']
+
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        fig.suptitle('Cross-Token Interference Analysis', fontsize=16)
+
+        categories = ['Single Token', 'With Context']
+        accuracies = [
+            interference_data['single_token_accuracy'] * 100,
+            interference_data['context_accuracy'] * 100
+        ]
+        colors_int = ['#ff9999', '#66b3ff']
+
+        bars = ax.bar(categories, accuracies, color=colors_int, width=0.5)
+        ax.set_ylabel('Accuracy (%)')
+        ax.set_title('Token Prediction Accuracy: Isolated vs Contextual')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        for i, v in enumerate(accuracies):
+            ax.text(i, v + 1, f'{v:.2f}%', ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+        # Add interference effect annotation
+        interference_effect = interference_data['interference_effect'] * 100
+        ax.text(0.5, min(accuracies) - 5,
+               f'Interference Effect: {interference_effect:+.2f}%\n' +
+               ('(Context helps)' if interference_effect > 0 else '(Context hurts)'),
+               ha='center', va='top', fontsize=12,
+               bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
+
+        plt.tight_layout()
+        plt.savefig(output_dir / 'cross_token_interference.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✅ Saved: {output_dir / 'cross_token_interference.png'}")
 
 
 def main():
