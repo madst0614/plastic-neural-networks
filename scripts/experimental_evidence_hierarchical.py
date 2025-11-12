@@ -985,10 +985,6 @@ class BrainActivityPredictor:
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
 
-                # Embedding 활동
-                embeddings = self.model.embeddings(input_ids)
-                patterns['embeddings'].append(embeddings.mean(dim=[0, 1]).cpu().numpy())
-
                 # 각 블록별 활동 캡처
                 activations = {}
                 def get_activation(name):
@@ -1005,9 +1001,17 @@ class BrainActivityPredictor:
                     handle = block['ffn'].register_forward_hook(get_activation(f'block_{i}'))
                     handles.append(handle)
 
-                # Forward pass
-                hidden = self.model(input_ids, attention_mask)
-                patterns['final'].append(hidden.mean(dim=[0, 1]).cpu().numpy())
+                # Forward pass with return_all_steps to get embeddings
+                try:
+                    all_outputs = self.model(input_ids, attention_mask, return_all_steps=True)
+                    # all_outputs[0] is the initial representation (embeddings + position)
+                    patterns['embeddings'].append(all_outputs[0].mean(dim=[0, 1]).cpu().numpy())
+                    # all_outputs[-1] is the final output
+                    patterns['final'].append(all_outputs[-1].mean(dim=[0, 1]).cpu().numpy())
+                except TypeError:
+                    # Fallback if return_all_steps not supported
+                    hidden = self.model(input_ids, attention_mask)
+                    patterns['final'].append(hidden.mean(dim=[0, 1]).cpu().numpy())
 
                 # 블록별 활동 저장
                 for i in range(self.num_blocks):
