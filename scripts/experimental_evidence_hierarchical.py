@@ -2587,6 +2587,9 @@ def main():
     def convert_to_serializable(obj):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
+        elif isinstance(obj, np.generic):
+            # Handle numpy scalar types (bool_, int64, float64, etc.)
+            return obj.item()
         elif isinstance(obj, dict):
             return {k: convert_to_serializable(v) for k, v in obj.items()}
         elif isinstance(obj, list):
