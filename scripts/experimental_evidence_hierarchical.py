@@ -244,7 +244,9 @@ class BlockContributionAnalyzer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
 
-                loss, logits = self.model(input_ids, attention_mask, labels)
+                # Forward pass
+                hidden = self.model(input_ids, attention_mask)
+                loss, logits = self.model.get_mlm_loss(hidden, labels)
 
                 # Accuracy
                 predictions = logits.argmax(dim=-1)
