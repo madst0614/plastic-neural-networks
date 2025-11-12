@@ -1773,28 +1773,44 @@ def visualize_results(results: Dict, output_dir: Path):
             for g in gate_names:
                 top_dims_data.append(dim_data['top_dimensions'][g][:5])  # Top 5
 
-            # Display as table (axis off, so title goes on figure)
             ax.axis('off')
-            table_data = [[f'G{i}'] + [str(d) for d in dims] for i, dims in enumerate(top_dims_data)]
-            table = ax.table(cellText=table_data, colLabels=['Gate', '1st', '2nd', '3rd', '4th', '5th'],
-                           cellLoc='center', loc='center')
+
+            # Create table with proper formatting
+            table_data = [[f'Gate {i}'] + [f'{d}' for d in dims] for i, dims in enumerate(top_dims_data)]
+            table = ax.table(
+                cellText=table_data,
+                colLabels=['', 'Top 1', 'Top 2', 'Top 3', 'Top 4', 'Top 5'],
+                cellLoc='center',
+                loc='center',
+                bbox=[0.1, 0.1, 0.8, 0.75]  # [left, bottom, width, height]
+            )
+
             table.auto_set_font_size(False)
-            table.set_fontsize(8)
-            table.scale(1.2, 2.0)  # Increase width and height for better display
+            table.set_fontsize(9)
+
+            # Set column widths explicitly
+            for i in range(len(table_data) + 1):
+                table[(i, 0)].set_width(0.15)  # Gate column
+                for j in range(1, 6):
+                    table[(i, j)].set_width(0.15)  # Dimension columns
 
             # Style the table
             for i in range(len(table_data) + 1):
                 for j in range(6):
                     cell = table[(i, j)]
+                    cell.set_height(0.08)
                     if i == 0:  # Header row
                         cell.set_facecolor('#4472C4')
-                        cell.set_text_props(weight='bold', color='white')
+                        cell.set_text_props(weight='bold', color='white', fontsize=10)
                     else:
-                        cell.set_facecolor('#E7E6E6' if i % 2 == 0 else 'white')
+                        cell.set_facecolor('#F2F2F2' if i % 2 == 0 else 'white')
+                        cell.set_text_props(fontsize=9)
+                    cell.set_edgecolor('#CCCCCC')
+                    cell.set_linewidth(1)
 
-            # Add title above table using text
-            ax.text(0.5, 0.98, 'Top 5 Activated Dimensions per Gate',
-                   ha='center', va='top', fontsize=12, fontweight='bold',
+            # Add title above table
+            ax.text(0.5, 0.95, 'Top 5 Most Activated Dimensions per Gate',
+                   ha='center', va='top', fontsize=13, fontweight='bold',
                    transform=ax.transAxes)
 
         plt.tight_layout()
