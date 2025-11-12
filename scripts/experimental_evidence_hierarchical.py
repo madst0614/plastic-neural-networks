@@ -1779,11 +1779,21 @@ def visualize_results(results: Dict, output_dir: Path):
             table = ax.table(cellText=table_data, colLabels=['Gate', '1st', '2nd', '3rd', '4th', '5th'],
                            cellLoc='center', loc='center')
             table.auto_set_font_size(False)
-            table.set_fontsize(9)
-            table.scale(1, 1.5)
+            table.set_fontsize(8)
+            table.scale(1.2, 2.0)  # Increase width and height for better display
+
+            # Style the table
+            for i in range(len(table_data) + 1):
+                for j in range(6):
+                    cell = table[(i, j)]
+                    if i == 0:  # Header row
+                        cell.set_facecolor('#4472C4')
+                        cell.set_text_props(weight='bold', color='white')
+                    else:
+                        cell.set_facecolor('#E7E6E6' if i % 2 == 0 else 'white')
 
             # Add title above table using text
-            ax.text(0.5, 0.95, 'Top 5 Activated Dimensions per Gate',
+            ax.text(0.5, 0.98, 'Top 5 Activated Dimensions per Gate',
                    ha='center', va='top', fontsize=12, fontweight='bold',
                    transform=ax.transAxes)
 
