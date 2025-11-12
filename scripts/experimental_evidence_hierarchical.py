@@ -92,9 +92,8 @@ class HierarchicalMEGSimulator:
         각 refinement step에서 block들의 활동 패턴 측정
         """
         results = {
-            'step_block_activities': [],  # [num_steps, num_blocks]
-            'step_gate_values': [],       # [num_steps, num_blocks]
-            'block_contributions': [],     # 각 block의 기여도
+            'step_block_activities': [],  # [batches, steps, blocks]
+            'step_gate_values': [],       # [batches, steps, blocks]
         }
 
         with torch.no_grad():
