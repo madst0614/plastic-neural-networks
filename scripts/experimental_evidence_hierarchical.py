@@ -350,6 +350,311 @@ class GateSpecificityAnalyzer:
         return results
 
 
+class OptogeneticsSimulator:
+    """
+    Optogenetics 시뮬레이션 - Hierarchical PNN용
+    특정 block/gate를 억제하여 행동 변화 관찰
+    """
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+        if not hasattr(model.delta_refiner, 'blocks'):
+            raise ValueError("This simulator requires a hierarchical PNN model")
+
+        self.num_blocks = len(model.delta_refiner.blocks)
+
+    def suppress_block(
+        self,
+        block_idx: int,
+        suppression_rate: float = 1.0
+    ):
+        """특정 block의 mini_gate를 억제"""
+        class SuppressionHook:
+            def __init__(self, rate):
+                self.rate = rate
+
+            def __call__(self, module, input, output):
+                return output * (1.0 - self.rate)
+
+        hook = SuppressionHook(suppression_rate)
+        handle = self.model.delta_refiner.mini_gates[block_idx].register_forward_hook(hook)
+        return handle
+
+    def measure_behavior(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """모델 행동 측정"""
+        total_loss = 0.0
+        total_correct = 0
+        total_tokens = 0
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(dataloader):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                hidden = self.model(input_ids, attention_mask)
+                loss, logits = self.model.get_mlm_loss(hidden, labels)
+
+                total_loss += loss.item()
+
+                preds = logits.argmax(dim=-1)
+                mask = (labels != -100)
+                correct = (preds == labels) & mask
+                total_correct += correct.sum().item()
+                total_tokens += mask.sum().item()
+
+        return {
+            'loss': total_loss / num_batches,
+            'accuracy': total_correct / total_tokens if total_tokens > 0 else 0,
+            'total_tokens': total_tokens
+        }
+
+    def run_suppression_experiment(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """여러 block에 대한 억제 실험"""
+        results = {}
+
+        # Baseline
+        print("\n📊 Baseline (No suppression)...")
+        results['baseline'] = self.measure_behavior(dataloader, num_batches=num_batches)
+
+        # Block 억제 실험
+        suppression_rates = [0.25, 0.5, 0.75, 1.0]
+
+        for block_idx in range(self.num_blocks):
+            for rate in suppression_rates:
+                print(f"\n🔬 Suppressing block {block_idx} at {rate*100:.0f}%...")
+
+                handle = self.suppress_block(block_idx, rate)
+                metrics = self.measure_behavior(dataloader, num_batches=num_batches)
+
+                key = f"block_{block_idx}_suppressed_{int(rate*100)}"
+                results[key] = metrics
+
+                handle.remove()
+
+        return results
+
+
+class DimensionwiseAnalyzer:
+    """차원별 gate 활동 분석"""
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+        if not hasattr(model.delta_refiner, 'mini_gates'):
+            raise ValueError("This analyzer requires a hierarchical PNN model")
+
+        self.num_blocks = len(model.delta_refiner.mini_gates)
+
+    def analyze_dimensionwise_gates(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """차원별 gate 활성화 패턴 분석"""
+        gate_activations = {i: [] for i in range(self.num_blocks)}
+
+        def get_gate_hook(gate_idx):
+            def hook(module, input, output):
+                gate_activations[gate_idx].append(output.detach().cpu())
+            return hook
+
+        handles = []
+        for i, gate in enumerate(self.model.delta_refiner.mini_gates):
+            handle = gate.register_forward_hook(get_gate_hook(i))
+            handles.append(handle)
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Dimension Analysis")):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+
+                _ = self.model(input_ids, attention_mask)
+
+        for handle in handles:
+            handle.remove()
+
+        results = {
+            'per_dimension_stats': {},
+            'top_dimensions': {},
+        }
+
+        for gate_idx in range(self.num_blocks):
+            gate_vals = torch.cat(gate_activations[gate_idx], dim=0)  # [tokens, hidden_size]
+
+            # Per-dimension statistics
+            dim_means = gate_vals.mean(dim=0)  # [hidden_size]
+            dim_stds = gate_vals.std(dim=0)
+
+            results['per_dimension_stats'][f'gate_{gate_idx}'] = {
+                'means': dim_means.tolist(),
+                'stds': dim_stds.tolist(),
+                'active_ratio': (dim_means > 0.5).float().mean().item()
+            }
+
+            # Top activated dimensions
+            top_dims = torch.argsort(dim_means, descending=True)[:10].tolist()
+            results['top_dimensions'][f'gate_{gate_idx}'] = top_dims
+
+        return results
+
+
+class TokenDifficultyAnalyzer:
+    """토큰 난이도별 모델 행동 분석"""
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_by_difficulty(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """토큰 난이도별로 loss와 gate 활동 분석"""
+        token_losses = []
+        token_predictions = []
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Difficulty Analysis")):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                hidden = self.model(input_ids, attention_mask)
+                loss, logits = self.model.get_mlm_loss(hidden, labels)
+
+                # Per-token loss
+                token_loss = F.cross_entropy(
+                    logits.view(-1, self.model.vocab_size),
+                    labels.view(-1),
+                    ignore_index=-100,
+                    reduction='none'
+                ).view(labels.shape)
+
+                mask = labels != -100
+                token_losses.extend(token_loss[mask].cpu().tolist())
+
+                preds = logits.argmax(dim=-1)
+                correct = (preds == labels) & mask
+                token_predictions.extend(correct[mask].cpu().tolist())
+
+        # Difficulty bins
+        token_losses = np.array(token_losses)
+        token_predictions = np.array(token_predictions)
+
+        # Sort by loss (difficulty)
+        sorted_indices = np.argsort(token_losses)
+        bin_size = len(sorted_indices) // 4
+
+        results = {
+            'easy': {
+                'avg_loss': float(token_losses[sorted_indices[:bin_size]].mean()),
+                'accuracy': float(token_predictions[sorted_indices[:bin_size]].mean())
+            },
+            'medium': {
+                'avg_loss': float(token_losses[sorted_indices[bin_size:2*bin_size]].mean()),
+                'accuracy': float(token_predictions[sorted_indices[bin_size:2*bin_size]].mean())
+            },
+            'hard': {
+                'avg_loss': float(token_losses[sorted_indices[2*bin_size:3*bin_size]].mean()),
+                'accuracy': float(token_predictions[sorted_indices[2*bin_size:3*bin_size]].mean())
+            },
+            'very_hard': {
+                'avg_loss': float(token_losses[sorted_indices[3*bin_size:]].mean()),
+                'accuracy': float(token_predictions[sorted_indices[3*bin_size:]].mean())
+            }
+        }
+
+        return results
+
+
+class CrossTokenInterferenceAnalyzer:
+    """토큰 간 간섭 효과 분석"""
+
+    def __init__(self, model: nn.Module, device: str = 'cuda'):
+        self.model = model
+        self.device = device
+        self.model.eval()
+
+    def analyze_interference(
+        self,
+        dataloader,
+        num_batches: int = 10
+    ) -> Dict:
+        """단일 토큰 vs 컨텍스트 내 토큰의 예측 차이 분석"""
+        single_token_accs = []
+        context_token_accs = []
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Interference Analysis")):
+                if batch_idx >= num_batches:
+                    break
+
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+
+                # Full context prediction
+                hidden = self.model(input_ids, attention_mask)
+                _, logits = self.model.get_mlm_loss(hidden, labels)
+
+                preds = logits.argmax(dim=-1)
+                mask = labels != -100
+                correct_context = (preds == labels) & mask
+
+                # Single token prediction (mask all other tokens)
+                for seq_idx in range(input_ids.size(0)):
+                    for pos_idx in range(input_ids.size(1)):
+                        if not mask[seq_idx, pos_idx]:
+                            continue
+
+                        # Create single-token input
+                        single_input = input_ids[seq_idx:seq_idx+1, pos_idx:pos_idx+1]
+                        single_mask = attention_mask[seq_idx:seq_idx+1, pos_idx:pos_idx+1]
+                        single_label = labels[seq_idx:seq_idx+1, pos_idx:pos_idx+1]
+
+                        single_hidden = self.model(single_input, single_mask)
+                        _, single_logits = self.model.get_mlm_loss(single_hidden, single_label)
+
+                        single_pred = single_logits.argmax(dim=-1)
+                        correct_single = (single_pred == single_label).item()
+
+                        single_token_accs.append(correct_single)
+                        context_token_accs.append(correct_context[seq_idx, pos_idx].item())
+
+        results = {
+            'single_token_accuracy': float(np.mean(single_token_accs)),
+            'context_accuracy': float(np.mean(context_token_accs)),
+            'interference_effect': float(np.mean(context_token_accs) - np.mean(single_token_accs))
+        }
+
+        return results
+
+
 def prepare_test_data(tokenizer, num_samples=320, max_length=128):
     """테스트 데이터 준비"""
     from pnn.data.dataset import MLMDataset
@@ -499,7 +804,7 @@ def main():
         '--experiment',
         type=str,
         default='all',
-        choices=['all', 'meg', 'blocks', 'gates'],
+        choices=['all', 'meg', 'blocks', 'gates', 'optogenetics', 'dimensionwise', 'difficulty', 'cross_token'],
         help='Which experiment to run'
     )
     parser.add_argument(
@@ -641,6 +946,70 @@ def main():
             print(f"     Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
             print(f"     Entropy: {entropy:.4f} (lower = more selective)")
             print(f"     Sparsity: {sparsity*100:.1f}% (dims < 0.1)")
+
+    # Experiment 4: Optogenetics
+    if args.experiment in ['all', 'optogenetics']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 4: Optogenetics Simulation")
+        print(f"{'='*80}\n")
+
+        opto_sim = OptogeneticsSimulator(model, args.device)
+        opto_results = opto_sim.run_suppression_experiment(test_loader, args.num_batches)
+        results['optogenetics'] = opto_results
+
+        print("\n📊 Optogenetics Results:")
+        baseline = opto_results['baseline']
+        print(f"   Baseline: loss={baseline['loss']:.4f}, acc={baseline['accuracy']*100:.2f}%")
+        print(f"\n   Suppression impacts:")
+        for key, metrics in opto_results.items():
+            if key != 'baseline':
+                acc_drop = (baseline['accuracy'] - metrics['accuracy']) * 100
+                print(f"     {key}: acc={metrics['accuracy']*100:.2f}% (Δ{acc_drop:+.2f}%)")
+
+    # Experiment 5: Dimensionwise Analysis
+    if args.experiment in ['all', 'dimensionwise']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 5: Dimensionwise Gate Analysis")
+        print(f"{'='*80}\n")
+
+        dim_analyzer = DimensionwiseAnalyzer(model, args.device)
+        dim_results = dim_analyzer.analyze_dimensionwise_gates(test_loader, args.num_batches)
+        results['dimensionwise'] = dim_results
+
+        print("\n📊 Dimensionwise Results:")
+        for gate_name, stats in dim_results['per_dimension_stats'].items():
+            print(f"   {gate_name}:")
+            print(f"     Active ratio: {stats['active_ratio']*100:.1f}%")
+            print(f"     Top dimensions: {dim_results['top_dimensions'][gate_name][:5]}")
+
+    # Experiment 6: Token Difficulty
+    if args.experiment in ['all', 'difficulty']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 6: Token Difficulty Analysis")
+        print(f"{'='*80}\n")
+
+        diff_analyzer = TokenDifficultyAnalyzer(model, args.device)
+        diff_results = diff_analyzer.analyze_by_difficulty(test_loader, args.num_batches)
+        results['difficulty'] = diff_results
+
+        print("\n📊 Difficulty Results:")
+        for category, stats in diff_results.items():
+            print(f"   {category.upper()}: loss={stats['avg_loss']:.4f}, acc={stats['accuracy']*100:.2f}%")
+
+    # Experiment 7: Cross-Token Interference
+    if args.experiment in ['all', 'cross_token']:
+        print(f"\n{'='*80}")
+        print("🔬 Experiment 7: Cross-Token Interference Analysis")
+        print(f"{'='*80}\n")
+
+        interference_analyzer = CrossTokenInterferenceAnalyzer(model, args.device)
+        interference_results = interference_analyzer.analyze_interference(test_loader, args.num_batches)
+        results['cross_token'] = interference_results
+
+        print("\n📊 Interference Results:")
+        print(f"   Single token accuracy: {interference_results['single_token_accuracy']*100:.2f}%")
+        print(f"   Context accuracy: {interference_results['context_accuracy']*100:.2f}%")
+        print(f"   Interference effect: {interference_results['interference_effect']*100:+.2f}%")
 
     # Save results
     results_file = output_dir / 'results.json'
