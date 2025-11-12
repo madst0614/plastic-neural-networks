@@ -367,10 +367,10 @@ def prepare_test_data(tokenizer, num_samples=320, max_length=128):
                 break
 
     mlm_dataset = MLMDataset(
-        samples,
         tokenizer,
+        samples,
         max_length=max_length,
-        mlm_probability=0.15
+        mask_prob=0.15
     )
 
     dataloader = torch.utils.data.DataLoader(
